@@ -21,6 +21,7 @@ use iroh::endpoint::{
     Connection as IrohEndpointConnection, RecvStream, RelayMode, SendStream, presets,
 };
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMap, RelayUrl, SecretKey};
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use postcard::{from_bytes, to_allocvec};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
@@ -125,37 +126,53 @@ impl ConnectionManager {
     async fn build_endpoint(config: &Config) -> Result<(Endpoint, SecretKey)> {
         let (secret_key, my_passphrase) = Self::get_keypair(&config.base_dir);
 
-        let mut builder = Endpoint::builder(presets::N0)
-            .secret_key(secret_key)
-            .alpns(vec![ALPN.to_vec()]);
+        // mDNS lets peers on the same LAN find each other directly, without a relay or
+        // the public n0 DNS/pkarr services. It is always enabled, and is the only
+        // discovery mechanism in `iroh_local_only` mode.
+        let mdns_lookup = MdnsAddressLookup::builder();
 
-        let relay_mode = match &config.iroh_relay {
-            Some(iroh_relay) => {
-                let relay_url = RelayUrl::from_str(iroh_relay)?;
-                let relay_map = RelayMap::from(relay_url);
-                RelayMode::Custom(relay_map)
-            }
-            _ => RelayMode::Default,
+        let builder = if config.iroh_local_only {
+            // LAN-only mode: no relays, no n0 DNS/pkarr. Discovery is mDNS only.
+            Endpoint::builder(presets::Minimal)
+                .secret_key(secret_key)
+                .alpns(vec![ALPN.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .address_lookup(mdns_lookup)
+        } else {
+            let mut builder = Endpoint::builder(presets::N0)
+                .secret_key(secret_key)
+                .alpns(vec![ALPN.to_vec()]);
+
+            let relay_mode = match &config.iroh_relay {
+                Some(iroh_relay) => {
+                    let relay_url = RelayUrl::from_str(iroh_relay)?;
+                    let relay_map = RelayMap::from(relay_url);
+                    RelayMode::Custom(relay_map)
+                }
+                _ => RelayMode::Default,
+            };
+            builder = builder.relay_mode(relay_mode);
+
+            let iroh_dns_lookup = config.iroh_dns_domain.as_ref().map_or_else(
+                DnsAddressLookup::n0_dns,
+                |iroh_dns_domain| {
+                    let iroh_dns_domain_clone = iroh_dns_domain.clone();
+                    DnsAddressLookup::builder(iroh_dns_domain_clone)
+                },
+            );
+            builder = builder.address_lookup(iroh_dns_lookup);
+
+            let iroh_pkarr_lookup = match &config.iroh_pkarr_relay {
+                Some(iroh_pkarr_relay) => {
+                    let iroh_pkarr_relay_url = Url::parse(iroh_pkarr_relay)?;
+                    PkarrPublisher::builder(iroh_pkarr_relay_url)
+                }
+                _ => PkarrPublisher::n0_dns(),
+            };
+            builder = builder.address_lookup(iroh_pkarr_lookup);
+
+            builder.address_lookup(mdns_lookup)
         };
-        builder = builder.relay_mode(relay_mode);
-
-        let iroh_dns_lookup = config.iroh_dns_domain.as_ref().map_or_else(
-            DnsAddressLookup::n0_dns,
-            |iroh_dns_domain| {
-                let iroh_dns_domain_clone = iroh_dns_domain.clone();
-                DnsAddressLookup::builder(iroh_dns_domain_clone)
-            },
-        );
-        builder = builder.address_lookup(iroh_dns_lookup);
-
-        let iroh_pkarr_lookup = match &config.iroh_pkarr_relay {
-            Some(iroh_pkarr_relay) => {
-                let iroh_pkarr_relay_url = Url::parse(iroh_pkarr_relay)?;
-                PkarrPublisher::builder(iroh_pkarr_relay_url)
-            }
-            _ => PkarrPublisher::n0_dns(),
-        };
-        builder = builder.address_lookup(iroh_pkarr_lookup);
 
         let endpoint = builder.bind().await?;
 

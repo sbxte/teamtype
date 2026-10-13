@@ -139,6 +139,9 @@ pub struct Config {
     pub iroh_relay: Option<String>,
     pub iroh_dns_domain: Option<String>,
     pub iroh_pkarr_relay: Option<String>,
+    /// Restrict networking to the local network (LAN) only: disable Iroh relays and
+    /// the public n0 DNS/pkarr discovery, and discover peers via mDNS instead.
+    pub iroh_local_only: bool,
     pub vcs_mode: VcsMode,
     pub username: Option<String>,
 }
@@ -166,6 +169,16 @@ impl Config {
         // we do the computation of username before initializing the struct, because we need to
         // reference base_dir, which gets moved into the struct
         let username = get_username(config_cli.username, &base_dir, general_section, ui);
+
+        // LAN-only mode does not use Magic Wormhole. The choice of whether to print a
+        // secret address or a join code is scoped to the `share` subcommand in
+        // `cli::config::parse_share_config`, so it doesn't leak into `join`.
+        let iroh_local_only = config_cli.iroh_local_only
+            || general_section.get("iroh_local_only").is_some_and(|local| {
+                local
+                    .parse()
+                    .expect("Failed to parse config parameter `iroh_local_only` as bool")
+            });
         Ok(Self {
             // TODO: extract all the other fields to its own struct, s.t. we don't have to work
             // around the fact that base_dir won't ever be in the config file.
@@ -209,6 +222,7 @@ impl Config {
                     .get("iroh_pkarr_relay")
                     .map(ToString::to_string)
             }),
+            iroh_local_only,
             vcs_mode: config_cli.vcs_mode,
             username: Some(username),
         })

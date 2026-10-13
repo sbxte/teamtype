@@ -27,6 +27,22 @@ After using a join code, the secret address is stored in your `.teamtype/config`
 You can directly connect across different local networks, even when each of you is behind a router.
 This way of connecting is more "ad hoc" and useful if you want to collaborate over a short period of time (as described in more detail in the [pair programming scenario](pair-programming.md)).
 
+## Same local network
+
+If all peers are on the same local network (LAN), they can find each other with mDNS, without involving any external service.
+Pass `--local-only` on every peer (or set `iroh_local_only = true` in `.teamtype/config`):
+
+    teamtype share --local-only
+
+This disables Iroh relays and the public DNS/pkarr discovery, so no traffic leaves the LAN and no internet connection is required.
+Since join codes go through the public Magic Wormhole service, `share --local-only` prints the secret address instead.
+Each other person writes that address into `.teamtype/config`:
+
+    peer=<secret_address>
+
+and then runs `teamtype join`.
+Note that mDNS discovery can take a moment; the daemon keeps retrying if the first connection attempt fails.
+
 ## Cloud peer
 
 When you want to have an "always online" host, such that every user can connect to it at the time of their liking, let's say you're collaborating in a group on [taking notes](shared-notes.md).

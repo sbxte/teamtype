@@ -65,6 +65,7 @@ docstr.workspace = true
 futures.workspace = true
 ignore = "0.4"
 iroh = "1"
+iroh-mdns-address-lookup = "0.6"
 magic-wormhole = "0.8"
 microxdg = "0.2"
 operational-transform = "0.6"

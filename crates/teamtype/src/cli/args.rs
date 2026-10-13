@@ -43,6 +43,11 @@ pub struct ShareJoinFlags {
     /// Use an alternative Iroh Pkarr relay server.
     #[arg(long)]
     pub iroh_pkarr_relay: Option<String>,
+    /// Restrict networking to the local network (LAN) only: disable Iroh relays and the
+    /// public n0 DNS/pkarr discovery, and discover peers via mDNS instead. Implies
+    /// `--no-join-code --show-secret-address` for `share`. All peers must be on the same LAN.
+    #[arg(long)]
+    pub local_only: bool,
     #[arg(long)]
     /// The name that others see next to your cursor. Defaults to your Git username.
     pub username: Option<String>,

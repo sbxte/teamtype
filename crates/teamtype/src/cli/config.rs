@@ -35,6 +35,7 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
                 iroh_relay,
                 iroh_dns_domain,
                 iroh_pkarr_relay,
+                local_only,
                 sync_vcs,
                 username,
                 ..
@@ -51,6 +52,7 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
             iroh_relay,
             iroh_dns_domain,
             iroh_pkarr_relay,
+            iroh_local_only: local_only,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
             username,
         };
@@ -71,6 +73,7 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
                 iroh_relay,
                 iroh_dns_domain,
                 iroh_pkarr_relay,
+                local_only,
                 sync_vcs,
                 username,
                 ..
@@ -88,12 +91,20 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
             iroh_relay,
             iroh_dns_domain,
             iroh_pkarr_relay,
+            iroh_local_only: local_only,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
             username,
         };
         let mut config = Config::from_config_file_and_cli(config_cli, ui)?;
         // Because of the "share" subcommand, explicitly don't connect anywhere.
         config.peer = None;
+        // LAN-only mode doesn't use Magic Wormhole, so there's no point in trying to
+        // generate a join code. Print the secret address for others to paste instead.
+        // This is scoped to `share`, so a joining peer never prints its own address.
+        if config.iroh_local_only {
+            config.emit_join_code = false;
+            config.emit_secret_address = true;
+        }
         Ok(config)
     } else {
         unreachable!("Only Share commands beget Share configs.")
