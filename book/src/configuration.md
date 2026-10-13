@@ -20,7 +20,7 @@ magic_wormhole_relay = <magic_wormhole_mailbox_relay_url>
 iroh_relay = <iroh_relay_url>
 iroh_dns_domain = <iroh_dns_domain>
 iroh_pkarr_relay = <iroh_pkarr_relay>
-iroh_local_only = <true/false>
+iroh_mdns_only = <true/false>
 ```
 
 After a successful `teamtype join`, the peer's secret address is automatically stored in your `.teamtype/config`.
@@ -28,9 +28,9 @@ In the future, you can then use `teamtype join` without a join code to reconnect
 
 ## LAN-only mode
 
-Setting `iroh_local_only = true` (or passing `--local-only`) disables Iroh relays and the public n0 DNS/pkarr discovery.
+Setting `iroh_mdns_only = true` (or passing `--mdns-only`) disables Iroh relays and the public n0 DNS/pkarr discovery.
 Peers then find each other with mDNS, which only works between devices on the same local network.
 No internet connection is needed, and no traffic leaves the LAN.
 
-Because join codes are exchanged through the public Magic Wormhole service, `teamtype share --local-only` prints the secret address instead and skips the join code.
+Because join codes are exchanged through the public Magic Wormhole service, `teamtype share --mdns-only` prints the secret address instead and skips the join code.
 The other people put that secret address into their `.teamtype/config` as `peer=<secret_address>`, then run `teamtype join`.

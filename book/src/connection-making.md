@@ -30,12 +30,12 @@ This way of connecting is more "ad hoc" and useful if you want to collaborate ov
 ## Same local network
 
 If all peers are on the same local network (LAN), they can find each other with mDNS, without involving any external service.
-Pass `--local-only` on every peer (or set `iroh_local_only = true` in `.teamtype/config`):
+Pass `--mdns-only` on every peer (or set `iroh_mdns_only = true` in `.teamtype/config`):
 
-    teamtype share --local-only
+    teamtype share --mdns-only
 
 This disables Iroh relays and the public DNS/pkarr discovery, so no traffic leaves the LAN and no internet connection is required.
-Since join codes go through the public Magic Wormhole service, `share --local-only` prints the secret address instead.
+Since join codes go through the public Magic Wormhole service, `share --mdns-only` prints the secret address instead.
 Each other person writes that address into `.teamtype/config`:
 
     peer=<secret_address>

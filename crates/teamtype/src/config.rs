@@ -141,7 +141,7 @@ pub struct Config {
     pub iroh_pkarr_relay: Option<String>,
     /// Restrict networking to the local network (LAN) only: disable Iroh relays and
     /// the public n0 DNS/pkarr discovery, and discover peers via mDNS instead.
-    pub iroh_local_only: bool,
+    pub iroh_mdns_only: bool,
     pub vcs_mode: VcsMode,
     pub username: Option<String>,
 }
@@ -173,11 +173,11 @@ impl Config {
         // LAN-only mode does not use Magic Wormhole. The choice of whether to print a
         // secret address or a join code is scoped to the `share` subcommand in
         // `cli::config::parse_share_config`, so it doesn't leak into `join`.
-        let iroh_local_only = config_cli.iroh_local_only
-            || general_section.get("iroh_local_only").is_some_and(|local| {
+        let iroh_mdns_only = config_cli.iroh_mdns_only
+            || general_section.get("iroh_mdns_only").is_some_and(|local| {
                 local
                     .parse()
-                    .expect("Failed to parse config parameter `iroh_local_only` as bool")
+                    .expect("Failed to parse config parameter `iroh_mdns_only` as bool")
             });
         Ok(Self {
             // TODO: extract all the other fields to its own struct, s.t. we don't have to work
@@ -222,7 +222,7 @@ impl Config {
                     .get("iroh_pkarr_relay")
                     .map(ToString::to_string)
             }),
-            iroh_local_only,
+            iroh_mdns_only,
             vcs_mode: config_cli.vcs_mode,
             username: Some(username),
         })

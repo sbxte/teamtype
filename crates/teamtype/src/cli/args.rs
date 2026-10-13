@@ -47,7 +47,7 @@ pub struct ShareJoinFlags {
     /// public n0 DNS/pkarr discovery, and discover peers via mDNS instead. Implies
     /// `--no-join-code --show-secret-address` for `share`. All peers must be on the same LAN.
     #[arg(long)]
-    pub local_only: bool,
+    pub mdns_only: bool,
     #[arg(long)]
     /// The name that others see next to your cursor. Defaults to your Git username.
     pub username: Option<String>,

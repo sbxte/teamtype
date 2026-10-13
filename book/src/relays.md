@@ -13,7 +13,7 @@ All transmitted data is always end-to-end encrypted between peers.
 After a connection is established, peers connect directly, if possible.
 
 If you don't want to rely on these public relays, you can host your own ones, and instruct Teamtype to use them.
-If all peers are on the same local network, there is a simpler alternative: run everyone with `--local-only`, which disables the relays entirely and uses mDNS for discovery (see [Connection making](connection-making.md#same-local-network)).
+If all peers are on the same local network, there is a simpler alternative: run everyone with `--mdns-only`, which disables the relays entirely and uses mDNS for discovery (see [Connection making](connection-making.md#same-local-network)).
 Here's how that works for each of the relays.
 Note that we mostly describe a "development testing setup" here; for a production deployment, please look into the individual relays more carefully.
 

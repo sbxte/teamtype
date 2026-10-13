@@ -128,10 +128,10 @@ impl ConnectionManager {
 
         // mDNS lets peers on the same LAN find each other directly, without a relay or
         // the public n0 DNS/pkarr services. It is always enabled, and is the only
-        // discovery mechanism in `iroh_local_only` mode.
+        // discovery mechanism in `iroh_mdns_only` mode.
         let mdns_lookup = MdnsAddressLookup::builder();
 
-        let builder = if config.iroh_local_only {
+        let builder = if config.iroh_mdns_only {
             // LAN-only mode: no relays, no n0 DNS/pkarr. Discovery is mDNS only.
             Endpoint::builder(presets::Minimal)
                 .secret_key(secret_key)

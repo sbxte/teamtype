@@ -35,7 +35,7 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
                 iroh_relay,
                 iroh_dns_domain,
                 iroh_pkarr_relay,
-                local_only,
+                mdns_only,
                 sync_vcs,
                 username,
                 ..
@@ -52,7 +52,7 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
             iroh_relay,
             iroh_dns_domain,
             iroh_pkarr_relay,
-            iroh_local_only: local_only,
+            iroh_mdns_only: mdns_only,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
             username,
         };
@@ -73,7 +73,7 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
                 iroh_relay,
                 iroh_dns_domain,
                 iroh_pkarr_relay,
-                local_only,
+                mdns_only,
                 sync_vcs,
                 username,
                 ..
@@ -91,7 +91,7 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
             iroh_relay,
             iroh_dns_domain,
             iroh_pkarr_relay,
-            iroh_local_only: local_only,
+            iroh_mdns_only: mdns_only,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
             username,
         };
@@ -101,7 +101,7 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
         // LAN-only mode doesn't use Magic Wormhole, so there's no point in trying to
         // generate a join code. Print the secret address for others to paste instead.
         // This is scoped to `share`, so a joining peer never prints its own address.
-        if config.iroh_local_only {
+        if config.iroh_mdns_only {
             config.emit_join_code = false;
             config.emit_secret_address = true;
         }
