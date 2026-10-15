@@ -48,6 +48,15 @@ pub struct ShareJoinFlags {
     /// `--no-join-code --show-secret-address` for `share`. All peers must be on the same LAN.
     #[arg(long)]
     pub mdns_only: bool,
+    /// Bind the Iroh endpoint to a fixed UDP port. Use this together with `--peer-addr`
+    /// when mDNS discovery does not work, so the other side has a stable address to dial.
+    #[arg(long)]
+    pub bind_port: Option<u16>,
+    /// Comma-separated `ip:port` addresses to dial directly, bypassing address discovery.
+    /// Each peer can find the other's address with `ip -brief addr` (or its Tailscale IP)
+    /// and the port printed by `share`.
+    #[arg(long)]
+    pub peer_addr: Option<String>,
     #[arg(long)]
     /// The name that others see next to your cursor. Defaults to your Git username.
     pub username: Option<String>,

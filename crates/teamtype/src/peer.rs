@@ -8,6 +8,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::str::FromStr;
 use std::time::Duration;
@@ -47,12 +48,26 @@ impl FromStr for SecretAddress {
 
     fn from_str(s: &str) -> Result<Self> {
         let parts: Vec<&str> = s.split('#').collect();
-        if parts.len() != 2 {
-            bail!("Peer string must have format <endpoint_id>#<passphrase>");
+        if parts.len() < 2 {
+            bail!("Peer string must have format <endpoint_id>#<passphrase>[#<addr>[,<addr>...]]");
         }
 
-        let endpoint_addr = PublicKey::from_str(parts[0])?.into();
+        let mut endpoint_addr: EndpointAddr = PublicKey::from_str(parts[0])?.into();
         let passphrase = SecretKey::from_str(parts[1])?;
+
+        // Any remaining parts are direct ip:port addresses. They let us dial the peer
+        // without any discovery, which is needed when mDNS multicast doesn't cross the LAN.
+        for addr in parts[2..]
+            .join(",")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            endpoint_addr = endpoint_addr.with_ip_addr(
+                SocketAddr::from_str(addr)
+                    .with_context(|| format!("Invalid direct peer address: {addr}"))?,
+            );
+        }
 
         Ok(Self {
             endpoint_addr,
@@ -69,6 +84,8 @@ enum PeerAuth {
 pub struct ConnectionManager {
     message_tx: mpsc::Sender<EndpointMessage>,
     secret_address: String,
+    direct_addresses: Vec<SocketAddr>,
+    peer_addr: Vec<SocketAddr>,
 }
 
 impl ConnectionManager {
@@ -83,6 +100,8 @@ impl ConnectionManager {
 
         let encoded_passphrase = data_encoding::HEXLOWER.encode(&my_passphrase.to_bytes());
         let secret_address = format!("{}#{}", endpoint.id(), encoded_passphrase);
+        let direct_addresses = Self::local_direct_addresses(&endpoint);
+        let peer_addr = Self::parse_peer_addr(config.peer_addr.as_deref())?;
 
         let mut actor = EndpointActor::new(
             endpoint,
@@ -98,6 +117,8 @@ impl ConnectionManager {
         Ok(Self {
             message_tx,
             secret_address,
+            direct_addresses,
+            peer_addr,
         })
     }
 
@@ -106,12 +127,24 @@ impl ConnectionManager {
         &self.secret_address
     }
 
+    /// The `ip:port` addresses this endpoint is reachable at, for use with
+    /// `peer_addr` / `--peer-addr` on a peer when discovery does not work.
+    #[must_use]
+    pub fn direct_addresses(&self) -> &[SocketAddr] {
+        &self.direct_addresses
+    }
+
     pub async fn connect(&self, secret_address: String) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
 
+        let mut secret_address = SecretAddress::from_str(&secret_address)?;
+        for addr in &self.peer_addr {
+            secret_address.endpoint_addr = secret_address.endpoint_addr.with_ip_addr(*addr);
+        }
+
         self.message_tx
             .send(EndpointMessage::Connect {
-                secret_address: SecretAddress::from_str(&secret_address)?,
+                secret_address,
                 response_tx: Some(response_tx),
                 previous_attempts: 0,
             })
@@ -121,6 +154,46 @@ impl ConnectionManager {
         response_rx.await??;
 
         Ok(())
+    }
+
+    /// Parses a comma-separated list of `ip:port` addresses.
+    fn parse_peer_addr(peer_addr: Option<&str>) -> Result<Vec<SocketAddr>> {
+        let Some(peer_addr) = peer_addr else {
+            return Ok(Vec::new());
+        };
+        peer_addr
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                SocketAddr::from_str(s).with_context(|| format!("Invalid peer_addr entry: {s}"))
+            })
+            .collect()
+    }
+
+    /// Enumerates the `ip:port` addresses this endpoint listens on, so the user can
+    /// copy one into the other peer's `peer_addr` config.
+    fn local_direct_addresses(endpoint: &Endpoint) -> Vec<SocketAddr> {
+        let ports: Vec<u16> = endpoint
+            .bound_sockets()
+            .iter()
+            .map(SocketAddr::port)
+            .collect();
+        let mut addrs = Vec::new();
+        if let Ok(interfaces) = if_addrs::get_if_addrs() {
+            for interface in interfaces {
+                if interface.is_loopback() || !interface.is_oper_up() {
+                    continue;
+                }
+                for port in &ports {
+                    let addr = SocketAddr::new(interface.ip(), *port);
+                    if !addrs.contains(&addr) {
+                        addrs.push(addr);
+                    }
+                }
+            }
+        }
+        addrs
     }
 
     async fn build_endpoint(config: &Config) -> Result<(Endpoint, SecretKey)> {
@@ -172,6 +245,17 @@ impl ConnectionManager {
             builder = builder.address_lookup(iroh_pkarr_lookup);
 
             builder.address_lookup(mdns_lookup)
+        };
+
+        // A fixed port makes this endpoint's direct address stable across restarts, so a
+        // peer can dial it with `peer_addr` even when discovery is unavailable.
+        let builder = if let Some(port) = config.bind_port {
+            builder
+                .clear_ip_transports()
+                .bind_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port))?
+                .bind_addr(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port))?
+        } else {
+            builder
         };
 
         let endpoint = builder.bind().await?;

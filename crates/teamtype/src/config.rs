@@ -142,6 +142,12 @@ pub struct Config {
     /// Restrict networking to the local network (LAN) only: disable Iroh relays and
     /// the public n0 DNS/pkarr discovery, and discover peers via mDNS instead.
     pub iroh_mdns_only: bool,
+    /// Fixed UDP port for the Iroh endpoint. Useful together with `peer_addr`, so that
+    /// another peer can dial this one directly without any discovery.
+    pub bind_port: Option<u16>,
+    /// One or more comma-separated `ip:port` addresses to dial directly, bypassing all
+    /// address discovery (mDNS, DNS, relays).
+    pub peer_addr: Option<String>,
     pub vcs_mode: VcsMode,
     pub username: Option<String>,
 }
@@ -223,6 +229,15 @@ impl Config {
                     .map(ToString::to_string)
             }),
             iroh_mdns_only,
+            bind_port: config_cli.bind_port.or_else(|| {
+                general_section.get("bind_port").map(|p| {
+                    p.parse()
+                        .expect("Failed to parse config parameter `bind_port` as u16")
+                })
+            }),
+            peer_addr: config_cli
+                .peer_addr
+                .or_else(|| general_section.get("peer_addr").map(ToString::to_string)),
             vcs_mode: config_cli.vcs_mode,
             username: Some(username),
         })

@@ -36,6 +36,8 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
                 iroh_dns_domain,
                 iroh_pkarr_relay,
                 mdns_only,
+                bind_port,
+                peer_addr,
                 sync_vcs,
                 username,
                 ..
@@ -53,6 +55,8 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
             iroh_dns_domain,
             iroh_pkarr_relay,
             iroh_mdns_only: mdns_only,
+            bind_port,
+            peer_addr,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
             username,
         };
@@ -74,6 +78,8 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
                 iroh_dns_domain,
                 iroh_pkarr_relay,
                 mdns_only,
+                bind_port,
+                peer_addr,
                 sync_vcs,
                 username,
                 ..
@@ -92,6 +98,8 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
             iroh_dns_domain,
             iroh_pkarr_relay,
             iroh_mdns_only: mdns_only,
+            bind_port,
+            peer_addr,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
             username,
         };

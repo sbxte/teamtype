@@ -1070,6 +1070,24 @@ impl Daemon {
                 ///
             ));
         }
+        if config.iroh_mdns_only || config.bind_port.is_some() {
+            let direct_addrs = connection_manager
+                .direct_addresses()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            if !direct_addrs.is_empty() {
+                ui.inform(&docstr!(format!
+                    /// If the other machine cannot find this one via mDNS (for example because the
+                    /// network blocks multicast), it can dial this host directly. Add this to its
+                    /// .teamtype/config:
+                    ///
+                    ///     peer_addr={direct_addrs}
+                    ///
+                ));
+            }
+        }
         if config.emit_join_code {
             put_secret_address_into_wormhole(address, config.magic_wormhole_relay.clone(), ui)
                 .await;

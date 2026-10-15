@@ -43,6 +43,9 @@ Each other person writes that address into `.teamtype/config`:
 and then runs `teamtype join`.
 Note that mDNS discovery can take a moment; the daemon keeps retrying if the first connection attempt fails.
 
+If mDNS does not work (some Wi-Fi networks drop multicast between clients), you can bypass discovery and dial a fixed address.
+See [Dialing directly](configuration.md#dialing-directly).
+
 ## Cloud peer
 
 When you want to have an "always online" host, such that every user can connect to it at the time of their liking, let's say you're collaborating in a group on [taking notes](shared-notes.md).
