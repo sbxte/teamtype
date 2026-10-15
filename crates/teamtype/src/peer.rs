@@ -6,6 +6,7 @@
 
 //! This module provides a [`ConnectionManager`], which can be used to connect to other daemons.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -21,7 +22,7 @@ use futures::StreamExt as _;
 use iroh::address_lookup::DnsAddressLookup;
 use iroh::address_lookup::pkarr::PkarrPublisher;
 use iroh::endpoint::{
-    Connection as IrohEndpointConnection, RecvStream, RelayMode, SendStream, presets,
+    Connection as IrohEndpointConnection, IncomingAddr, RecvStream, RelayMode, SendStream, presets,
 };
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMap, RelayUrl, SecretKey};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
@@ -193,6 +194,70 @@ enum PeerAuth {
     },
 }
 
+/// Per-source-IP failure counter with a rolling window and a temporary ban.
+struct RateLimiter {
+    max_failures: u32,
+    window: Duration,
+    ban: Duration,
+    entries: HashMap<IpAddr, FailureEntry>,
+}
+
+struct FailureEntry {
+    count: u32,
+    window_start: Instant,
+    banned_until: Option<Instant>,
+}
+
+impl RateLimiter {
+    fn new(max_failures: u32, window: Duration, ban: Duration) -> Self {
+        Self {
+            max_failures,
+            window,
+            ban,
+            entries: HashMap::new(),
+        }
+    }
+
+    fn is_banned(&mut self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        if let Some(entry) = self.entries.get_mut(&ip)
+            && let Some(until) = entry.banned_until
+        {
+            if until > now {
+                return true;
+            }
+            entry.banned_until = None;
+            entry.count = 0;
+            entry.window_start = now;
+        }
+        false
+    }
+
+    fn record_failure(&mut self, ip: IpAddr) {
+        let now = Instant::now();
+        let max = self.max_failures;
+        let ban = self.ban;
+        let window = self.window;
+        let entry = self.entries.entry(ip).or_insert_with(|| FailureEntry {
+            count: 0,
+            window_start: now,
+            banned_until: None,
+        });
+        if now.duration_since(entry.window_start) > window {
+            entry.count = 0;
+            entry.window_start = now;
+        }
+        entry.count += 1;
+        if entry.count >= max {
+            entry.banned_until = Some(now + ban);
+        }
+    }
+
+    fn record_success(&mut self, ip: IpAddr) {
+        self.entries.remove(&ip);
+    }
+}
+
 pub struct ConnectionManager {
     message_tx: mpsc::Sender<EndpointMessage>,
     secret_address: String,
@@ -234,6 +299,11 @@ impl ConnectionManager {
             message_tx.clone(),
             document_handle,
             code_state.clone(),
+            Arc::new(Mutex::new(RateLimiter::new(
+                config.ban_max_failures(),
+                config.ban_window(),
+                config.ban_duration(),
+            ))),
             config.base_dir.clone(),
             ui,
         );
@@ -567,17 +637,23 @@ struct EndpointActor {
     message_tx: mpsc::Sender<EndpointMessage>,
     document_handle: DocumentActorHandle,
     code_state: Arc<Mutex<CodeState>>,
+    rate_limiter: Arc<Mutex<RateLimiter>>,
     base_dir: BaseDir,
     ui: UserInterface,
 }
 
 impl EndpointActor {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "actor wiring takes each collaborator explicitly"
+    )]
     fn new(
         endpoint: Endpoint,
         message_rx: mpsc::Receiver<EndpointMessage>,
         message_tx: mpsc::Sender<EndpointMessage>,
         document_handle: DocumentActorHandle,
         code_state: Arc<Mutex<CodeState>>,
+        rate_limiter: Arc<Mutex<RateLimiter>>,
         base_dir: BaseDir,
         ui: &UserInterface,
     ) -> Self {
@@ -587,6 +663,7 @@ impl EndpointActor {
             message_tx,
             document_handle,
             code_state,
+            rate_limiter,
             base_dir,
             ui: ui.clone(),
         }
@@ -728,9 +805,10 @@ impl EndpointActor {
                 maybe_incoming = self.endpoint.accept() => {
                     match maybe_incoming {
                         Some(incoming) => {
+                            let source = incoming.remote_addr();
                             match incoming.await {
                                 Ok(conn) => {
-                                    self.handle_incoming_connection(conn);
+                                    self.handle_incoming_connection(conn, source);
                                 }
                                 Err(err) => {
                                     debug!("Error while accepting peer connection: {err}");
@@ -758,22 +836,44 @@ impl EndpointActor {
         }
     }
 
-    fn handle_incoming_connection(&self, conn: IrohEndpointConnection) {
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the source address is produced here and not used elsewhere"
+    )]
+    fn handle_incoming_connection(&self, conn: IrohEndpointConnection, source: IncomingAddr) {
         let endpoint_id = conn.remote_id();
 
-        self.ui.inform(&format!("Peer connected: {endpoint_id}"));
+        let source_ip = match source {
+            IncomingAddr::Ip(addr) => Some(addr.ip()),
+            _ => None,
+        };
 
         let code_state = self.code_state.clone();
+        let rate_limiter = self.rate_limiter.clone();
         let document_handle_clone = self.document_handle.clone();
         tokio::spawn({
             let ui = self.ui.clone();
             async move {
+                if let Some(ip) = source_ip
+                    && rate_limiter.lock().await.is_banned(ip)
+                {
+                    ui.warn(&format!("Rejecting connection from banned source {ip}"));
+                    return;
+                }
+
+                ui.inform(&format!("Peer connected: {endpoint_id}"));
                 match PeerMessageStream::new(conn, &PeerAuth::Host(code_state.clone())).await {
                     Ok((stream, learned)) => {
+                        if let Some(ip) = source_ip {
+                            rate_limiter.lock().await.record_success(ip);
+                        }
                         code_state.lock().await.on_success(learned.is_some());
                         Self::run_syncer(document_handle_clone, stream).await;
                     }
                     Err(err) => {
+                        if let Some(ip) = source_ip {
+                            rate_limiter.lock().await.record_failure(ip);
+                        }
                         code_state.lock().await.on_failure();
                         ui.warn(&format!("Incoming connection failed: {err}"));
                     }

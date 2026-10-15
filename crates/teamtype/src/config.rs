@@ -293,6 +293,12 @@ pub struct Config {
     pub rotate_code: Option<RotateCode>,
     /// How long a retired invite code stays valid.
     pub rotate_grace: Option<std::time::Duration>,
+    /// Failed credentials from one source before it is temporarily banned.
+    pub ban_max_failures: Option<u32>,
+    /// Rolling window in which failures are counted.
+    pub ban_window: Option<std::time::Duration>,
+    /// How long a banned source stays banned.
+    pub ban_duration: Option<std::time::Duration>,
     /// Fixed UDP port for the Iroh endpoint. Useful together with `peer_addr`, so that
     /// another peer can dial this one directly without any discovery.
     pub bind_port: Option<u16>,
@@ -350,6 +356,22 @@ impl Config {
                 parse_duration(r).expect("Failed to parse config parameter `rotate_grace`")
             })
         });
+        let ban_max_failures = config_cli.ban_max_failures.or_else(|| {
+            general_section.get("ban_max_failures").map(|b| {
+                b.parse()
+                    .expect("Failed to parse config parameter `ban_max_failures` as u32")
+            })
+        });
+        let ban_window = config_cli.ban_window.or_else(|| {
+            general_section
+                .get("ban_window")
+                .map(|b| parse_duration(b).expect("Failed to parse config parameter `ban_window`"))
+        });
+        let ban_duration = config_cli.ban_duration.or_else(|| {
+            general_section.get("ban_duration").map(|b| {
+                parse_duration(b).expect("Failed to parse config parameter `ban_duration`")
+            })
+        });
         // We load the learned peer from the peers file, if any. This is machine-written and
         // kept separate from the human-owned config file.
         let peers_peer = read_peer_from_peers_file(&base_dir).map(Peer::SecretAddress);
@@ -396,6 +418,9 @@ impl Config {
             invite,
             rotate_code,
             rotate_grace,
+            ban_max_failures,
+            ban_window,
+            ban_duration,
             bind_port: config_cli.bind_port.or_else(|| {
                 general_section.get("bind_port").map(|p| {
                     p.parse()
@@ -486,6 +511,26 @@ impl Config {
         self.peer.is_none()
             && matches!(self.mode(), Mode::Mdns | Mode::Direct)
             && self.invite() == Invite::Auto
+    }
+
+    /// Maximum failures from one source within the window before banning.
+    #[must_use]
+    pub fn ban_max_failures(&self) -> u32 {
+        self.ban_max_failures.unwrap_or(20)
+    }
+
+    /// The rolling failure window.
+    #[must_use]
+    pub fn ban_window(&self) -> std::time::Duration {
+        self.ban_window
+            .unwrap_or_else(|| std::time::Duration::from_secs(300))
+    }
+
+    /// How long a banned source stays banned.
+    #[must_use]
+    pub fn ban_duration(&self) -> std::time::Duration {
+        self.ban_duration
+            .unwrap_or_else(|| std::time::Duration::from_secs(3600))
     }
 
     /// Whether the Magic Wormhole join-code loop should run.
