@@ -79,6 +79,10 @@ pub struct ShareJoinFlags {
     /// invite code where mDNS discovery is unavailable).
     #[arg(long)]
     pub peer_id: Option<String>,
+    /// Read the long-term passphrase (or a full `id#pass` string) from this file instead of
+    /// prompting. Useful for non-interactive direct joins.
+    #[arg(long)]
+    pub secret_file: Option<String>,
     #[arg(long)]
     /// The name that others see next to your cursor. Defaults to your Git username.
     pub username: Option<String>,

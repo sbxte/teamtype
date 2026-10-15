@@ -1110,8 +1110,13 @@ impl Daemon {
             }
         }
         if config.emit_join_code() {
-            put_secret_address_into_wormhole(address, config.magic_wormhole_relay.clone(), ui)
-                .await;
+            put_secret_address_into_wormhole(
+                address,
+                config.magic_wormhole_relay.clone(),
+                config.rotate_code(),
+                ui,
+            )
+            .await;
         }
         match config.peer {
             Some(Peer::SecretAddress(ref secret_address)) => {

@@ -44,6 +44,7 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
                 bind_port,
                 peer_addr,
                 peer_id,
+                secret_file,
                 sync_vcs,
                 username,
                 ..
@@ -70,6 +71,7 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
             bind_port,
             peer_addr,
             peer_id,
+            secret_file,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
             username,
         };
@@ -98,6 +100,7 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
                 bind_port,
                 peer_addr,
                 peer_id,
+                secret_file,
                 sync_vcs,
                 username,
                 ..
@@ -124,6 +127,7 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
             bind_port,
             peer_addr,
             peer_id,
+            secret_file,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
             username,
         };

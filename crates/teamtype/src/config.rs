@@ -29,6 +29,9 @@ pub(crate) const CONFIG_FILE: &str = "config";
 /// Machine-written file that stores the peer learned from a join code or handshake.
 /// Kept separate from [`CONFIG_FILE`], which is human-owned and never written by us.
 pub(crate) const PEERS_FILE: &str = "peers";
+/// Machine-written file holding the current invite code, for `rotate_code = never` and for
+/// headless hosts that need to surface it.
+pub(crate) const CODE_FILE: &str = "code";
 
 const EMIT_SECRET_ADDRESS_DEFAULT: bool = false;
 // TODO: Generate a random funny name.
@@ -215,8 +218,10 @@ impl Display for Invite {
 /// When the host rotates its invite code.
 #[derive(Default, Copy, Clone, Debug, Eq, PartialEq)]
 pub enum RotateCode {
-    /// Never rotate; one code for the session.
+    /// Never rotate; one persisted code for the life of the directory.
     Never,
+    /// One code per daemon session; a restart generates a new one.
+    PerSession,
     /// Rotate after a successful code join (default).
     #[default]
     OnJoin,
@@ -233,6 +238,7 @@ impl RotateCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Never => "never",
+            Self::PerSession => "per_session",
             Self::OnJoin => "on_join",
             Self::OnAttempt => "on_attempt",
             Self::Periodic => "periodic",
@@ -243,12 +249,13 @@ impl RotateCode {
     pub fn parse(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
             "never" => Ok(Self::Never),
+            "per_session" | "session" => Ok(Self::PerSession),
             "on_join" => Ok(Self::OnJoin),
             "on_attempt" => Ok(Self::OnAttempt),
             "periodic" => Ok(Self::Periodic),
             "continuous" => Ok(Self::Continuous),
             other => anyhow::bail!(
-                "Unknown rotate_code `{other}`. Expected one of: never, on_join, on_attempt, periodic, continuous"
+                "Unknown rotate_code `{other}`. Expected one of: never, per_session, on_join, on_attempt, periodic, continuous"
             ),
         }
     }
@@ -308,6 +315,9 @@ pub struct Config {
     /// Endpoint id to dial in `direct` mode, e.g. when joining with an invite code and no
     /// mDNS discovery is available.
     pub peer_id: Option<String>,
+    /// Path to a file containing the long-term passphrase (or a full `id#pass` string) for
+    /// non-interactive direct joins.
+    pub secret_file: Option<String>,
     pub vcs_mode: VcsMode,
     pub username: Option<String>,
 }
@@ -433,6 +443,9 @@ impl Config {
             peer_id: config_cli
                 .peer_id
                 .or_else(|| general_section.get("peer_id").map(ToString::to_string)),
+            secret_file: config_cli
+                .secret_file
+                .or_else(|| general_section.get("secret_file").map(ToString::to_string)),
             vcs_mode: config_cli.vcs_mode,
             username: Some(username),
         })
@@ -463,13 +476,41 @@ impl Config {
                 peer: Some(Peer::SecretAddress(secret_address)),
                 ..self
             }
-        } else if self.mode() == Mode::Direct
-            && self.peer.is_none()
-            && let Some(peer_id) = self.peer_id.clone()
-        {
-            // Direct mode without a code: ask for the passphrase and remember the peer.
-            let passphrase = ui.prompt_secret(&format!("Passphrase for {peer_id}:"))?;
-            let secret_address = format!("{}#{}", peer_id.trim(), passphrase.trim());
+        } else if self.mode() == Mode::Direct && self.peer.is_none() && self.peer_id.is_some() {
+            // Direct mode without a code: take the passphrase from `--secret-file`, or ask
+            // for it, then remember the peer.
+            let secret_address = if let Some(path) = &self.secret_file {
+                let content = std::fs::read_to_string(path)
+                    .with_context(|| format!("Failed to read secret file `{path}`"))?;
+                let content = content.trim();
+                if content.contains('#') {
+                    content.to_string()
+                } else {
+                    let peer_id = self.peer_id.as_deref().unwrap_or_default();
+                    format!("{}#{}", peer_id.trim(), content)
+                }
+            } else {
+                let peer_id = self.peer_id.as_deref().unwrap_or_default();
+                let passphrase = ui.prompt_secret(&format!("Passphrase for {peer_id}:"))?;
+                format!("{}#{}", peer_id.trim(), passphrase.trim())
+            };
+            store_learned_peer(&self.base_dir, &secret_address, ui)?;
+            Self {
+                peer: Some(Peer::SecretAddress(secret_address)),
+                ..self
+            }
+        } else if self.mode() == Mode::Direct && self.peer.is_none() && self.secret_file.is_some() {
+            // A secret file with a full `id#pass` and no explicit `--peer-id`.
+            let path = self.secret_file.as_deref().unwrap_or_default();
+            let secret_address = std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read secret file `{path}`"))?
+                .trim()
+                .to_string();
+            if !secret_address.contains('#') {
+                anyhow::bail!(
+                    "--secret-file must contain `id#passphrase` when --peer-id is not given"
+                );
+            }
             store_learned_peer(&self.base_dir, &secret_address, ui)?;
             Self {
                 peer: Some(Peer::SecretAddress(secret_address)),

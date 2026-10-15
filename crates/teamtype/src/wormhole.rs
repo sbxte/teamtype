@@ -8,17 +8,36 @@ use std::{borrow::Cow, str::FromStr, time::Duration};
 
 use anyhow::Result;
 use docstr::docstr;
-use magic_wormhole::{AppConfig, AppID, Code, MailboxConnection, Wormhole, transfer};
+use magic_wormhole::{AppConfig, AppID, Code, MailboxConnection, Password, Wormhole, transfer};
 use rand::seq::IteratorRandom;
 use tokio::time::sleep;
 
 const NETWORK_RETRY: Duration = Duration::from_mins(5);
+/// How often `rotate_code = periodic` replaces a Magic Wormhole mailbox.
+const MW_ROTATE_PERIOD: Duration = Duration::from_mins(10);
 
+use crate::config::RotateCode;
 use crate::types::UserInterface;
+
+/// Picks a random `adjective-noun` Magic Wormhole password.
+fn random_password(adjectives: &[&str], nouns: &[&str]) -> Password {
+    let adjective = adjectives
+        .iter()
+        .choose(&mut rand::rng())
+        .expect("Word list cannot be empty");
+    let noun = nouns
+        .iter()
+        .choose(&mut rand::rng())
+        .expect("Word list cannot be empty");
+    format!("{adjective}-{noun}")
+        .parse()
+        .expect("Password must be long enough and have enough entropy")
+}
 
 pub async fn put_secret_address_into_wormhole(
     address: &str,
     magic_wormhole_relay: Option<String>,
+    rotate: RotateCode,
     ui: &UserInterface,
 ) {
     let payload: Vec<u8> = address.into();
@@ -30,18 +49,13 @@ pub async fn put_secret_address_into_wormhole(
     tokio::spawn({
         let ui = ui.clone();
         async move {
+            // `never` reuses a single password, so the join code stays stable.
+            let fixed_password =
+                (rotate == RotateCode::Never).then(|| random_password(&adjectives, &nouns));
             loop {
-                let adjective = adjectives
-                    .iter()
-                    .choose(&mut rand::rng())
-                    .expect("Word list cannot be empty");
-                let noun = nouns
-                    .iter()
-                    .choose(&mut rand::rng())
-                    .expect("Word list cannot be empty");
-                let password = format!("{adjective}-{noun}")
-                    .parse()
-                    .expect("Password must be long enough and have enough entropy");
+                let password = fixed_password
+                    .clone()
+                    .unwrap_or_else(|| random_password(&adjectives, &nouns));
 
                 let Ok(mailbox_connection) =
                     MailboxConnection::create_with_password(config.clone(), password).await
@@ -61,14 +75,35 @@ pub async fn put_secret_address_into_wormhole(
                         ///
                 ));
 
-                if let Ok(mut wormhole) = Wormhole::connect(mailbox_connection).await {
+                // `periodic` bounds how long a mailbox waits for a peer before the code is
+                // replaced; the other policies simply wait for a peer to arrive.
+                let connected = match rotate {
+                    RotateCode::Periodic => {
+                        match tokio::time::timeout(
+                            MW_ROTATE_PERIOD,
+                            Wormhole::connect(mailbox_connection),
+                        )
+                        .await
+                        {
+                            Ok(Ok(wormhole)) => Some(wormhole),
+                            _ => None,
+                        }
+                    }
+                    _ => Wormhole::connect(mailbox_connection).await.ok(),
+                };
+
+                if let Some(mut wormhole) = connected {
                     let _ = wormhole.send(payload.clone()).await;
                 } else {
                     ui.warn("Failed to share secret address. Did your peer mistype the join code?");
                 }
 
-                // Print a new join code in the next iteration of the for loop, to allow more people
-                // to join.
+                if rotate == RotateCode::Continuous {
+                    // Keep offering fresh mailboxes without waiting.
+                    continue;
+                }
+
+                // Print a new join code in the next iteration, to allow more people to join.
                 sleep(Duration::from_millis(500)).await;
             }
         }

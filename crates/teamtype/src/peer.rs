@@ -34,7 +34,7 @@ use url::Url;
 
 use self::sync::{Connection, PeerMessage, SyncActor};
 use crate::code;
-use crate::config::{BaseDir, Config, Mode, RotateCode};
+use crate::config::{BaseDir, CODE_FILE, Config, Mode, RotateCode};
 use crate::daemon::DocumentActorHandle;
 use crate::types::UserInterface;
 
@@ -81,6 +81,9 @@ struct CodeState {
     retired: Vec<(SecretKey, Instant)>,
     grace: Duration,
     rotate: RotateCode,
+    base_dir: BaseDir,
+    /// When true, persist the code so it survives restarts (`rotate_code = never`).
+    persist: bool,
     ui: UserInterface,
 }
 
@@ -96,8 +99,10 @@ impl CodeState {
         long_term: SecretKey,
         grace: Duration,
         rotate: RotateCode,
+        base_dir: BaseDir,
         ui: &UserInterface,
     ) -> Self {
+        let persist = rotate == RotateCode::Never;
         Self {
             endpoint_id,
             long_term,
@@ -105,8 +110,35 @@ impl CodeState {
             retired: Vec::new(),
             grace,
             rotate,
+            base_dir,
+            persist,
             ui: ui.clone(),
         }
+    }
+
+    fn code_file_path(&self) -> std::path::PathBuf {
+        self.base_dir
+            .join(crate::config::CONFIG_DIR)
+            .join(CODE_FILE)
+    }
+
+    /// Uses a persisted code when `rotate_code = never`, otherwise generates one.
+    fn load_or_rotate(&mut self) {
+        if self.persist
+            && let Ok(bytes) = fs::read(self.code_file_path())
+        {
+            let code = String::from_utf8_lossy(&bytes).trim().to_string();
+            if !code.is_empty() {
+                let key = SecretKey::from_bytes(
+                    &code::derive_key(&code, &self.endpoint_id)
+                        .expect("Failed to derive invite key"),
+                );
+                self.ui.inform(&format!("Reusing invite code: {code}"));
+                self.current = Some((code, key));
+                return;
+            }
+        }
+        self.rotate();
     }
 
     fn prune(&mut self) {
@@ -127,6 +159,15 @@ impl CodeState {
         self.ui.inform(&format!(
             "One other person can use this to connect to you:\n\n   teamtype join {code}\n"
         ));
+        if self.persist {
+            let path = self.code_file_path();
+            if let Err(err) =
+                crate::sandbox::write_private_file(&self.base_dir, &path, code.as_bytes())
+            {
+                self.ui
+                    .warn(&format!("Failed to persist invite code: {err}"));
+            }
+        }
         self.current = Some((code, key));
     }
 
@@ -272,10 +313,11 @@ impl ConnectionManager {
             my_passphrase.clone(),
             config.rotate_grace(),
             config.rotate_code(),
+            config.base_dir.clone(),
             ui,
         )));
         if config.generates_invite_code() {
-            code_state.lock().await.rotate();
+            code_state.lock().await.load_or_rotate();
             Self::spawn_rotation(config, &code_state);
         }
 
