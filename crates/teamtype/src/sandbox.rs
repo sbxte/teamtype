@@ -48,6 +48,28 @@ pub fn write_file(
     Ok(())
 }
 
+/// Like [`write_file`], but restricts the file to the current user (0600).
+///
+/// Use this for files that hold secrets, such as learned peer credentials.
+pub fn write_private_file(
+    absolute_base_dir: &Path,
+    absolute_file_path: &Path,
+    content: &[u8],
+) -> Result<()> {
+    let canonical_file_path =
+        check_inside_base_dir_and_canonicalize(absolute_base_dir, absolute_file_path)?;
+
+    let parent_dir = canonical_file_path
+        .parent()
+        .expect("Failed to get parent directory");
+    create_dir_all(absolute_base_dir, parent_dir).expect("Failed to create parent directory");
+
+    fs::write(&canonical_file_path, content)?;
+    fs::set_permissions(&canonical_file_path, fs::Permissions::from_mode(0o600))
+        .context("Unable to restrict permissions of private file")?;
+    Ok(())
+}
+
 pub(crate) fn append_file(
     absolute_base_dir: &Path,
     absolute_file_path: &Path,

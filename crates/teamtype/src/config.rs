@@ -26,6 +26,9 @@ use crate::wormhole::get_secret_address_from_wormhole;
 pub(crate) const DEFAULT_SOCKET_NAME: &str = "socket";
 pub(crate) const CONFIG_DIR: &str = ".teamtype";
 pub(crate) const CONFIG_FILE: &str = "config";
+/// Machine-written file that stores the peer learned from a join code or handshake.
+/// Kept separate from [`CONFIG_FILE`], which is human-owned and never written by us.
+pub(crate) const PEERS_FILE: &str = "peers";
 
 const EMIT_JOIN_CODE_DEFAULT: bool = true;
 const EMIT_SECRET_ADDRESS_DEFAULT: bool = false;
@@ -185,15 +188,21 @@ impl Config {
                     .parse()
                     .expect("Failed to parse config parameter `iroh_mdns_only` as bool")
             });
+        // We load the learned peer from the peers file, if any. This is machine-written and
+        // kept separate from the human-owned config file.
+        let peers_peer = read_peer_from_peers_file(&base_dir).map(Peer::SecretAddress);
         Ok(Self {
             // TODO: extract all the other fields to its own struct, s.t. we don't have to work
             // around the fact that base_dir won't ever be in the config file.
             base_dir,
-            peer: config_cli.peer.or_else(|| {
-                general_section
-                    .get("peer")
-                    .map(|p| Peer::SecretAddress(p.to_string()))
-            }),
+            peer: config_cli
+                .peer
+                .or_else(|| {
+                    general_section
+                        .get("peer")
+                        .map(|p| Peer::SecretAddress(p.to_string()))
+                })
+                .or(peers_peer),
             emit_join_code: config_cli.emit_join_code
                 && general_section
                     .get("emit_join_code")
@@ -243,13 +252,13 @@ impl Config {
         })
     }
 
-    fn config_file(&self) -> PathBuf {
-        self.base_dir.join(CONFIG_DIR).join(CONFIG_FILE)
+    fn peers_file(&self) -> PathBuf {
+        self.base_dir.join(CONFIG_DIR).join(PEERS_FILE)
     }
 
-    /// If we have a join code, try to use that and overwrite the config file.
-    /// If we don't have a join code, try to use the configured peer.
-    /// Otherwise, fail.
+    /// If we have a join code, resolve it via Magic Wormhole and store the resulting peer in
+    /// the peers file. If we don't have a join code, use the configured peer. Otherwise, this
+    /// is host mode and there is nothing to resolve.
     pub async fn resolve_peer(self, ui: &UserInterface) -> Result<Self> {
         let resolved_config = if let Some(peer) = self.peer.clone()
             && let Peer::JoinCode(ref join_code) = peer
@@ -260,9 +269,9 @@ impl Config {
                     .context(
                         "Failed to retrieve secret address, was this join code already used?",
                     )?;
-            ui.log("Derived peer from join code. Storing in config (overwriting previous config).");
-            let config_file = self.config_file();
-            store_peer_in_config(&self.base_dir, &config_file, &secret_address, ui)?;
+            ui.log("Derived peer from join code. Storing in peers file.");
+            let peers_file = self.peers_file();
+            store_peer(&self.base_dir, &peers_file, &secret_address, ui)?;
             // Create a new Config struct with the resolved peer in place of the join code.
             Self {
                 peer: Some(Peer::SecretAddress(secret_address)),
@@ -284,20 +293,36 @@ impl Config {
     }
 }
 
-fn store_peer_in_config(
-    base_dir: &BaseDir,
-    config_file: &Path,
-    peer: &str,
-    ui: &UserInterface,
-) -> Result<()> {
+fn store_peer(base_dir: &BaseDir, peers_file: &Path, peer: &str, ui: &UserInterface) -> Result<()> {
     ui.log(&format!(
         "Storing peer's address in {}",
-        config_file.display()
+        peers_file.display()
     ));
 
     let content = format!("peer={peer}\n");
-    sandbox::write_file(base_dir, config_file, content.as_bytes())
-        .context("Failed to write to config file")
+    sandbox::write_private_file(base_dir, peers_file, content.as_bytes())
+        .context("Failed to write peers file")
+}
+
+/// Reads the machine-learned peer from the peers file, if present.
+fn read_peer_from_peers_file(base_dir: &BaseDir) -> Option<String> {
+    let peers_file = base_dir.join(CONFIG_DIR).join(PEERS_FILE);
+    if !peers_file.exists() {
+        return None;
+    }
+    let bytes = sandbox::read_file(base_dir, &peers_file).ok()?;
+    let content = String::from_utf8(bytes).ok()?;
+    parse_peer_line(&content)
+}
+
+/// Parses a `peer=<secret_address>` line out of an INI-like file.
+fn parse_peer_line(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        line.strip_prefix("peer=")
+            .map(str::trim)
+            .filter(|peer| !peer.is_empty())
+            .map(ToString::to_string)
+    })
 }
 
 #[must_use]
@@ -413,7 +438,7 @@ mod tests {
     use anyhow::{Context, Result};
     use tempfile::tempdir;
 
-    use super::BaseDir;
+    use super::{BaseDir, CONFIG_DIR, PEERS_FILE, parse_peer_line, read_peer_from_peers_file};
 
     #[test]
     fn try_into_basedir_from_pathbuf() -> Result<()> {
@@ -449,6 +474,39 @@ mod tests {
         assert!(path.exists(), "Temporary directory was not created");
         drop(base_dir);
         assert!(!path.exists(), "Temporary directory exists after drop");
+        Ok(())
+    }
+
+    #[test]
+    fn parses_peer_lines() {
+        assert_eq!(
+            parse_peer_line("peer=abc#def\n"),
+            Some("abc#def".to_string())
+        );
+        assert_eq!(
+            parse_peer_line("username=x\npeer=abc#def\n"),
+            Some("abc#def".to_string())
+        );
+        assert_eq!(parse_peer_line(""), None);
+        assert_eq!(parse_peer_line("peer=\n"), None);
+        assert_eq!(parse_peer_line("peer=   \n"), None);
+    }
+
+    #[test]
+    fn reads_peer_from_peers_file() -> Result<()> {
+        let temp = tempdir().context("Unable to create directory for tests")?;
+        let base_dir: BaseDir = temp.path().try_into()?;
+        let teamtype_dir = temp.path().join(CONFIG_DIR);
+        std::fs::create_dir_all(&teamtype_dir)?;
+
+        // Missing file yields nothing.
+        assert_eq!(read_peer_from_peers_file(&base_dir), None);
+
+        std::fs::write(teamtype_dir.join(PEERS_FILE), b"peer=id#pass\n")?;
+        assert_eq!(
+            read_peer_from_peers_file(&base_dir),
+            Some("id#pass".to_string())
+        );
         Ok(())
     }
 }
