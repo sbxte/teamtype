@@ -51,15 +51,10 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
         ..
     } = cli.command
     {
+        let peer = parse_join_peer(join_code, ui)?;
         let config_cli = Config {
             base_dir,
-            peer: join_code.map(|code| {
-                if code.starts_with("tt-") {
-                    config::Peer::InviteCode(code)
-                } else {
-                    config::Peer::JoinCode(code)
-                }
-            }),
+            peer,
             emit_secret_address: false,
             magic_wormhole_relay,
             iroh_relay,
@@ -139,6 +134,30 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
     } else {
         unreachable!("Only Share commands beget Share configs.")
     }
+}
+
+// Interpret the positional join argument: a `tt-…` invite code or a Magic Wormhole code.
+fn parse_join_peer(join_code: Option<String>, ui: &UserInterface) -> Result<Option<config::Peer>> {
+    let Some(code) = join_code else {
+        return Ok(None);
+    };
+    if !code.starts_with("tt-") {
+        return Ok(Some(config::Peer::JoinCode(code)));
+    }
+    let unknown: Vec<String> = teamtype::code::code_words(&code)
+        .into_iter()
+        .filter(|word| !teamtype::code::is_known_word(word))
+        .collect();
+    if !unknown.is_empty() {
+        let proceed = ui.confirm(&format!(
+            "These invite-code words are not in the local word list: {}. The host may use a different word list. Continue anyway?",
+            unknown.join(", ")
+        ))?;
+        if !proceed {
+            anyhow::bail!("Aborted: invite code contains unknown words");
+        }
+    }
+    Ok(Some(config::Peer::InviteCode(code)))
 }
 
 // Map mode flags to a `Mode`, if any was given.

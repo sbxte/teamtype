@@ -599,6 +599,10 @@ impl ConnectionManager {
 
 /// Derives this directory's long-term secret address (`endpoint_id#passphrase`) from the key
 /// file, without starting a daemon.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keeps a Result so callers can propagate key-loading errors if that becomes fallible"
+)]
 pub fn secret_address(base_dir: &BaseDir) -> Result<String> {
     let (secret_key, passphrase) = ConnectionManager::get_keypair(base_dir);
     Ok(format!(
