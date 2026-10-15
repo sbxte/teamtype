@@ -13,7 +13,7 @@ use super::args::{Cli, Commands, ShareJoinFlags};
 #[expect(clippy::needless_pass_by_value)]
 pub fn parse_client_config(cli: Cli, _ui: &UserInterface) -> Result<Config> {
     let base_dir = resolve_directory(&cli)?;
-    if matches!(cli.command, Commands::Client) {
+    if matches!(cli.command, Commands::Client | Commands::SecretAddress) {
         // The only thing the client can configure at runtime is where to find the socket.
         let conf = Config {
             base_dir,
@@ -205,7 +205,7 @@ fn resolve_directory(cli: &Cli) -> Result<BaseDir> {
                 return BaseDir::new_temporary();
             }
         }
-        Commands::Client => {}
+        Commands::Client | Commands::SecretAddress => {}
     }
     let directory = match cli.directory {
         Some(ref directory) => directory,

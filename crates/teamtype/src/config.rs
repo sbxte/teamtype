@@ -463,6 +463,18 @@ impl Config {
                 peer: Some(Peer::SecretAddress(secret_address)),
                 ..self
             }
+        } else if self.mode() == Mode::Direct
+            && self.peer.is_none()
+            && let Some(peer_id) = self.peer_id.clone()
+        {
+            // Direct mode without a code: ask for the passphrase and remember the peer.
+            let passphrase = ui.prompt_secret(&format!("Passphrase for {peer_id}:"))?;
+            let secret_address = format!("{}#{}", peer_id.trim(), passphrase.trim());
+            store_learned_peer(&self.base_dir, &secret_address, ui)?;
+            Self {
+                peer: Some(Peer::SecretAddress(secret_address)),
+                ..self
+            }
         } else {
             // In share mode or with already resolved peers there is no resolution needed.
             self

@@ -55,6 +55,12 @@ async fn main() -> Result<()> {
             let client_config = parse_client_config(cli, ui)?;
             return run_client(client_config).await;
         }
+        Commands::SecretAddress => {
+            let config = parse_client_config(cli, ui)?;
+            let address = teamtype::secret_address(&config.base_dir)?;
+            ui.inform(&format!("peer={address}"));
+            return Ok(());
+        }
         Commands::Join { .. } => {
             let join_config = parse_join_config(cli, ui)?;
             run_daemon(join_config, false, ui).await

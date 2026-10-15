@@ -18,6 +18,11 @@ pub trait Interactions: Send + Sync {
     /// continuing.
     fn confirm(&self, question: &str) -> Result<bool>;
 
+    /// Prompt for a secret value, without echoing it back to the user.
+    fn prompt_secret(&self, _question: &str) -> Result<String> {
+        anyhow::bail!("This interface cannot prompt for a secret")
+    }
+
     /// Log a message that is not essential to function and may only be seen if the user has
     /// verbose mode enabled or is watching a log file, but could be useful to keep track of what is
     /// going on.

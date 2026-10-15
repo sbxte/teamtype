@@ -111,6 +111,8 @@ pub enum Commands {
         #[command(flatten)]
         shared_flags: ShareJoinFlags,
     },
+    /// Print this directory's long-term secret address (`endpoint_id#passphrase`) and exit.
+    SecretAddress,
     /// Open a JSON-RPC connection to the Teamtype daemon on stdin/stdout. Used by text editor plugins.
     Client,
 }

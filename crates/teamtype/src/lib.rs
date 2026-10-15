@@ -25,6 +25,9 @@ pub mod editor_protocol;
 #[cfg(test)]
 pub(crate) mod testing;
 
+// Public re-exports used by the CLI
+pub use peer::secret_address;
+
 // Private modules
 pub mod code;
 mod editor;

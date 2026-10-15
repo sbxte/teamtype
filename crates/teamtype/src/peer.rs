@@ -58,26 +58,12 @@ impl FromStr for SecretAddress {
 
     fn from_str(s: &str) -> Result<Self> {
         let parts: Vec<&str> = s.split('#').collect();
-        if parts.len() < 2 {
-            bail!("Peer string must have format <endpoint_id>#<passphrase>[#<addr>[,<addr>...]]");
+        if parts.len() != 2 {
+            bail!("Peer string must have format <endpoint_id>#<passphrase>");
         }
 
-        let mut endpoint_addr: EndpointAddr = PublicKey::from_str(parts[0])?.into();
+        let endpoint_addr = PublicKey::from_str(parts[0])?.into();
         let passphrase = SecretKey::from_str(parts[1])?;
-
-        // Any remaining parts are direct ip:port addresses. They let us dial the peer
-        // without any discovery, which is needed when mDNS multicast doesn't cross the LAN.
-        for addr in parts[2..]
-            .join(",")
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            endpoint_addr = endpoint_addr.with_ip_addr(
-                SocketAddr::from_str(addr)
-                    .with_context(|| format!("Invalid direct peer address: {addr}"))?,
-            );
-        }
 
         Ok(Self {
             endpoint_addr,
@@ -335,7 +321,6 @@ impl ConnectionManager {
         });
     }
 
-    #[must_use]
     pub fn secret_address(&self) -> &str {
         &self.secret_address
     }
@@ -610,6 +595,17 @@ impl ConnectionManager {
             (secret_key, passphrase)
         }
     }
+}
+
+/// Derives this directory's long-term secret address (`endpoint_id#passphrase`) from the key
+/// file, without starting a daemon.
+pub fn secret_address(base_dir: &BaseDir) -> Result<String> {
+    let (secret_key, passphrase) = ConnectionManager::get_keypair(base_dir);
+    Ok(format!(
+        "{}#{}",
+        secret_key.public(),
+        data_encoding::HEXLOWER.encode(&passphrase.to_bytes())
+    ))
 }
 
 enum EndpointMessage {

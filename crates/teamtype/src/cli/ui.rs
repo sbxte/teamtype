@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use anyhow::{Context, Result};
-use inquire::Confirm;
+use inquire::{Confirm, Password};
 use nu_ansi_term::{Color, Style};
 use teamtype::traits::Interactions;
 use tracing::debug;
@@ -32,6 +32,14 @@ impl Interactions for ConsoleInteractions {
             .with_default(false)
             .prompt()
             .context("Failed to read answer to y/n prompt")
+    }
+
+    fn prompt_secret(&self, question: &str) -> Result<String> {
+        debug!("UI prompt_secret event: {question}");
+        Password::new(question)
+            .without_confirmation()
+            .prompt()
+            .context("Failed to read secret from prompt")
     }
 
     fn log(&self, message: &str) {
