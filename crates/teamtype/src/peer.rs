@@ -36,7 +36,9 @@ use crate::types::UserInterface;
 
 mod sync;
 
-const ALPN: &[u8] = b"/teamtype/0";
+const ALPN: &[u8] = b"/teamtype/1";
+/// mDNS service name for advertisement and discovery. Versioned so the protocol can evolve.
+const MDNS_SERVICE_NAME: &str = "teamtype1";
 
 struct SecretAddress {
     endpoint_addr: EndpointAddr,
@@ -205,7 +207,7 @@ impl ConnectionManager {
                 .secret_key(secret_key)
                 .alpns(vec![ALPN.to_vec()])
                 .relay_mode(RelayMode::Disabled)
-                .address_lookup(MdnsAddressLookup::builder()),
+                .address_lookup(MdnsAddressLookup::builder().service_name(MDNS_SERVICE_NAME)),
             // Direct: no discovery at all. Peers are dialed by their supplied address.
             Mode::Direct => Endpoint::builder(presets::Minimal)
                 .secret_key(secret_key)
@@ -244,7 +246,7 @@ impl ConnectionManager {
                 };
                 builder = builder.address_lookup(iroh_pkarr_lookup);
 
-                builder.address_lookup(MdnsAddressLookup::builder())
+                builder.address_lookup(MdnsAddressLookup::builder().service_name(MDNS_SERVICE_NAME))
             }
         };
 
