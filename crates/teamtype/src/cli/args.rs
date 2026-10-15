@@ -43,11 +43,19 @@ pub struct ShareJoinFlags {
     /// Use an alternative Iroh Pkarr relay server.
     #[arg(long)]
     pub iroh_pkarr_relay: Option<String>,
-    /// Restrict networking to the local network (LAN) only: disable Iroh relays and the
-    /// public n0 DNS/pkarr discovery, and discover peers via mDNS instead. Implies
-    /// `--no-join-code --show-secret-address` for `share`. All peers must be on the same LAN.
+    /// Use Magic Wormhole, pkarr/DNS discovery, and Iroh relays (default).
+    #[arg(long, group = "mode")]
+    pub magic_wormhole: bool,
+    /// Discover peers via mDNS only. No pkarr, no relays.
+    #[arg(long, group = "mode")]
+    pub mdns: bool,
+    /// No discovery: dial the peer's endpoint id and address directly.
+    #[arg(long, group = "mode")]
+    pub direct: bool,
+    /// Whether the host generates a short invite code (`auto`) or relies on the long-term
+    /// secret address (`manual`). Defaults: auto for magic-wormhole/mdns, manual for direct.
     #[arg(long)]
-    pub mdns_only: bool,
+    pub invite: Option<String>,
     /// Bind the Iroh endpoint to a fixed UDP port. Use this together with `--peer-addr`
     /// when mDNS discovery does not work, so the other side has a stable address to dial.
     #[arg(long)]
@@ -76,11 +84,7 @@ pub enum Commands {
         /// Re-initialize the history of the shared directory. You will loose previous history.
         #[arg(long)]
         init: bool,
-        /// Do not generate a join code. To prevent unintended sharing or simply if you want to
-        /// keep Magic Wormhole out of the loop.
-        #[arg(long)]
-        no_join_code: bool,
-        /// Print the secret address. Useful for sharing with multiple people.
+        /// Print the secret address. Useful when using the invite code manually.
         #[arg(long)]
         show_secret_address: bool,
         #[command(flatten)]

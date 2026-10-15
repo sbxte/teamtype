@@ -32,7 +32,7 @@ use tracing::debug;
 
 use crate::config::has_git_remote;
 use crate::config::has_local_user_config;
-use crate::config::{BaseDir, Config, NetworkMode, Peer, VcsMode};
+use crate::config::{BaseDir, Config, Mode, NetworkMode, Peer, VcsMode};
 use crate::config::{CONFIG_DIR, DEFAULT_SOCKET_NAME};
 use crate::document::{self, Document};
 use crate::editor::{self, EditorId, EditorWriter};
@@ -1062,7 +1062,12 @@ impl Daemon {
             .expect("Failed to start connection manager");
         let address = connection_manager.secret_address();
 
-        if config.emit_secret_address {
+        // TODO(invite-codes): replace with the print matrix once invite codes exist for
+        // mdns/direct (print the code when invite=auto, a hint otherwise). Until then,
+        // non-Magic-Wormhole modes print the secret address so they stay usable.
+        let print_secret = config.emit_secret_address
+            || (config.mode() != Mode::MagicWormhole && !config.emit_join_code());
+        if print_secret {
             ui.inform(&docstr!(format!
                 /// Others can connect by putting the following secret address in their .teamtype/config:
                 ///
@@ -1070,7 +1075,7 @@ impl Daemon {
                 ///
             ));
         }
-        if config.iroh_mdns_only || config.bind_port.is_some() {
+        if matches!(config.mode(), Mode::Mdns | Mode::Direct) || config.bind_port.is_some() {
             let direct_addrs = connection_manager
                 .direct_addresses()
                 .iter()
@@ -1088,7 +1093,7 @@ impl Daemon {
                 ));
             }
         }
-        if config.emit_join_code {
+        if config.emit_join_code() {
             put_secret_address_into_wormhole(address, config.magic_wormhole_relay.clone(), ui)
                 .await;
         }

@@ -30,7 +30,6 @@ pub(crate) const CONFIG_FILE: &str = "config";
 /// Kept separate from [`CONFIG_FILE`], which is human-owned and never written by us.
 pub(crate) const PEERS_FILE: &str = "peers";
 
-const EMIT_JOIN_CODE_DEFAULT: bool = true;
 const EMIT_SECRET_ADDRESS_DEFAULT: bool = false;
 // TODO: Generate a random funny name.
 const USERNAME_FALLBACK: &str = "Anonymous";
@@ -132,19 +131,98 @@ pub enum NetworkMode {
     Peer,
 }
 
+/// How peers discover each other and how traffic is carried.
+#[derive(Default, Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Mode {
+    /// pkarr/DNS discovery plus Iroh relays; Magic Wormhole transports the credential.
+    #[default]
+    MagicWormhole,
+    /// mDNS discovery, no pkarr, no relays.
+    Mdns,
+    /// No discovery; the peer supplies the endpoint id and address directly.
+    Direct,
+}
+
+impl Mode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MagicWormhole => "magic-wormhole",
+            Self::Mdns => "mdns",
+            Self::Direct => "direct",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "magic-wormhole" | "magic_wormhole" | "wormhole" => Ok(Self::MagicWormhole),
+            "mdns" => Ok(Self::Mdns),
+            "direct" => Ok(Self::Direct),
+            other => anyhow::bail!(
+                "Unknown mode `{other}`. Expected one of: magic-wormhole, mdns, direct"
+            ),
+        }
+    }
+}
+
+impl Display for Mode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whether the host generates a short, rotating invite code that peers can use to join.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Invite {
+    Auto,
+    Manual,
+}
+
+impl Invite {
+    #[must_use]
+    pub const fn default_for(mode: Mode) -> Self {
+        match mode {
+            Mode::Direct => Self::Manual,
+            Mode::MagicWormhole | Mode::Mdns => Self::Auto,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "manual" => Ok(Self::Manual),
+            other => anyhow::bail!("Unknown invite `{other}`. Expected one of: auto, manual"),
+        }
+    }
+}
+
+impl Display for Invite {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct Config {
     pub base_dir: BaseDir,
     pub peer: Option<Peer>,
-    pub emit_join_code: bool,
     pub emit_secret_address: bool,
     pub magic_wormhole_relay: Option<String>,
     pub iroh_relay: Option<String>,
     pub iroh_dns_domain: Option<String>,
     pub iroh_pkarr_relay: Option<String>,
-    /// Restrict networking to the local network (LAN) only: disable Iroh relays and
-    /// the public n0 DNS/pkarr discovery, and discover peers via mDNS instead.
-    pub iroh_mdns_only: bool,
+    /// How peers discover each other and how traffic is carried.
+    pub mode: Option<Mode>,
+    /// Whether the host generates a short invite code. Defaults per mode.
+    pub invite: Option<Invite>,
     /// Fixed UDP port for the Iroh endpoint. Useful together with `peer_addr`, so that
     /// another peer can dial this one directly without any discovery.
     pub bind_port: Option<u16>,
@@ -179,15 +257,16 @@ impl Config {
         // reference base_dir, which gets moved into the struct
         let username = get_username(config_cli.username, &base_dir, general_section, ui);
 
-        // LAN-only mode does not use Magic Wormhole. The choice of whether to print a
-        // secret address or a join code is scoped to the `share` subcommand in
-        // `cli::config::parse_share_config`, so it doesn't leak into `join`.
-        let iroh_mdns_only = config_cli.iroh_mdns_only
-            || general_section.get("iroh_mdns_only").is_some_and(|local| {
-                local
-                    .parse()
-                    .expect("Failed to parse config parameter `iroh_mdns_only` as bool")
-            });
+        let mode = config_cli.mode.or_else(|| {
+            general_section
+                .get("mode")
+                .map(|m| Mode::parse(m).expect("Failed to parse config parameter `mode`"))
+        });
+        let invite = config_cli.invite.or_else(|| {
+            general_section
+                .get("invite")
+                .map(|i| Invite::parse(i).expect("Failed to parse config parameter `invite`"))
+        });
         // We load the learned peer from the peers file, if any. This is machine-written and
         // kept separate from the human-owned config file.
         let peers_peer = read_peer_from_peers_file(&base_dir).map(Peer::SecretAddress);
@@ -203,13 +282,6 @@ impl Config {
                         .map(|p| Peer::SecretAddress(p.to_string()))
                 })
                 .or(peers_peer),
-            emit_join_code: config_cli.emit_join_code
-                && general_section
-                    .get("emit_join_code")
-                    .map_or(EMIT_JOIN_CODE_DEFAULT, |ejc| {
-                        ejc.parse()
-                            .expect("Failed to parse config parameter `emit_join_code` as bool")
-                    }),
             emit_secret_address: config_cli.emit_secret_address
                 || general_section.get("emit_secret_address").map_or(
                     EMIT_SECRET_ADDRESS_DEFAULT,
@@ -237,7 +309,8 @@ impl Config {
                     .get("iroh_pkarr_relay")
                     .map(ToString::to_string)
             }),
-            iroh_mdns_only,
+            mode,
+            invite,
             bind_port: config_cli.bind_port.or_else(|| {
                 general_section.get("bind_port").map(|p| {
                     p.parse()
@@ -290,6 +363,25 @@ impl Config {
         } else {
             NetworkMode::Peer
         }
+    }
+
+    /// The resolved networking mode, defaulting to `magic-wormhole`.
+    #[must_use]
+    pub fn mode(&self) -> Mode {
+        self.mode.unwrap_or_default()
+    }
+
+    /// The resolved invite setting, defaulting per mode.
+    #[must_use]
+    pub fn invite(&self) -> Invite {
+        self.invite
+            .unwrap_or_else(|| Invite::default_for(self.mode()))
+    }
+
+    /// Whether the Magic Wormhole join-code loop should run.
+    #[must_use]
+    pub fn emit_join_code(&self) -> bool {
+        self.mode() == Mode::MagicWormhole && self.invite() == Invite::Auto
     }
 }
 

@@ -35,7 +35,10 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
                 iroh_relay,
                 iroh_dns_domain,
                 iroh_pkarr_relay,
-                mdns_only,
+                magic_wormhole,
+                mdns,
+                direct,
+                invite,
                 bind_port,
                 peer_addr,
                 sync_vcs,
@@ -48,13 +51,13 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
         let config_cli = Config {
             base_dir,
             peer: join_code.map(config::Peer::JoinCode),
-            emit_join_code: false,
             emit_secret_address: false,
             magic_wormhole_relay,
             iroh_relay,
             iroh_dns_domain,
             iroh_pkarr_relay,
-            iroh_mdns_only: mdns_only,
+            mode: mode_from_flags(magic_wormhole, mdns, direct),
+            invite: parse_invite(invite)?,
             bind_port,
             peer_addr,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
@@ -70,14 +73,16 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
 pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
     let base_dir = resolve_directory(&cli)?;
     if let Commands::Share {
-        no_join_code,
         shared_flags:
             ShareJoinFlags {
                 magic_wormhole_relay,
                 iroh_relay,
                 iroh_dns_domain,
                 iroh_pkarr_relay,
-                mdns_only,
+                magic_wormhole,
+                mdns,
+                direct,
+                invite,
                 bind_port,
                 peer_addr,
                 sync_vcs,
@@ -91,13 +96,13 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
         let config_cli = Config {
             base_dir,
             peer: None,
-            emit_join_code: !no_join_code,
             emit_secret_address: show_secret_address,
             magic_wormhole_relay,
             iroh_relay,
             iroh_dns_domain,
             iroh_pkarr_relay,
-            iroh_mdns_only: mdns_only,
+            mode: mode_from_flags(magic_wormhole, mdns, direct),
+            invite: parse_invite(invite)?,
             bind_port,
             peer_addr,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
@@ -106,17 +111,32 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
         let mut config = Config::from_config_file_and_cli(config_cli, ui)?;
         // Because of the "share" subcommand, explicitly don't connect anywhere.
         config.peer = None;
-        // LAN-only mode doesn't use Magic Wormhole, so there's no point in trying to
-        // generate a join code. Print the secret address for others to paste instead.
-        // This is scoped to `share`, so a joining peer never prints its own address.
-        if config.iroh_mdns_only {
-            config.emit_join_code = false;
-            config.emit_secret_address = true;
-        }
         Ok(config)
     } else {
         unreachable!("Only Share commands beget Share configs.")
     }
+}
+
+// Map mode flags to a `Mode`, if any was given.
+fn mode_from_flags(magic_wormhole: bool, mdns: bool, direct: bool) -> Option<config::Mode> {
+    if magic_wormhole {
+        Some(config::Mode::MagicWormhole)
+    } else if mdns {
+        Some(config::Mode::Mdns)
+    } else if direct {
+        Some(config::Mode::Direct)
+    } else {
+        None
+    }
+}
+
+// Parse the optional `--invite` value.
+fn parse_invite(invite: Option<String>) -> Result<Option<config::Invite>> {
+    invite
+        .as_deref()
+        .map(config::Invite::parse)
+        .transpose()
+        .map_err(Into::into)
 }
 
 // Map boolean flag inputs to config enum variants.
