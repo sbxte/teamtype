@@ -30,18 +30,17 @@ This way of connecting is more "ad hoc" and useful if you want to collaborate ov
 ## Same local network
 
 If all peers are on the same local network (LAN), they can find each other with mDNS, without involving any external service.
-Pass `--mdns-only` on every peer (or set `iroh_mdns_only = true` in `.teamtype/config`):
+Use `--mdns` (or set `mode = mdns` in `.teamtype/config`) on every peer:
 
-    teamtype share --mdns-only
+    teamtype share --mdns
 
 This disables Iroh relays and the public DNS/pkarr discovery, so no traffic leaves the LAN and no internet connection is required.
-Since join codes go through the public Magic Wormhole service, `share --mdns-only` prints the secret address instead.
-Each other person writes that address into `.teamtype/config`:
+`share --mdns` prints a short invite code:
 
-    peer=<secret_address>
+    teamtype join tt-pretty-later-woman-luxury
 
-and then runs `teamtype join`.
-Note that mDNS discovery can take a moment; the daemon keeps retrying if the first connection attempt fails.
+Each other person runs that command, adding `--mdns` if it is not already in their config.
+Note that mDNS discovery can take a moment, and the daemon keeps retrying.
 
 If mDNS does not work (some Wi-Fi networks drop multicast between clients), you can bypass discovery and dial a fixed address.
 See [Dialing directly](configuration.md#dialing-directly).
