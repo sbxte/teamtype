@@ -1063,10 +1063,8 @@ impl Daemon {
             .expect("Failed to start connection manager");
         let address = connection_manager.secret_address();
 
-        if config.peer.is_none()
-            && (config.emit_secret_address
-                || (config.mode() != Mode::MagicWormhole && !config.generates_invite_code()))
-        {
+        let show_secret = config.peer.is_none() && config.emit_secret_address;
+        if show_secret {
             ui.inform(&docstr!(format!
                 /// Others can connect by putting the following secret address in their .teamtype/config:
                 ///
@@ -1074,8 +1072,22 @@ impl Daemon {
                 ///
             ));
         }
-        if config.peer.is_none() && config.generates_invite_code() && !config.emit_secret_address {
-            ui.inform("Run with --show-secret-address to also print the long-term secret address.");
+        if config.peer.is_none() && !show_secret {
+            if config.generates_invite_code() {
+                ui.inform(
+                    "Run with --show-secret-address to also print the long-term secret address.",
+                );
+            } else if config.mode() != Mode::MagicWormhole {
+                ui.inform(
+                    "No invite code is generated. Run `teamtype secret-address` to print the long-term secret address.",
+                );
+            }
+        }
+        if config.peer.is_none() && config.mode() == Mode::Direct && config.generates_invite_code()
+        {
+            ui.warn(
+                "WARNING: an invite code is exposed in --direct mode. If any advertised address is globally reachable, the short code can be guessed. Prefer --invite manual, or only use this on a trusted network.",
+            );
         }
         if config.peer.is_none()
             && (matches!(config.mode(), Mode::Mdns | Mode::Direct) || config.bind_port.is_some())
