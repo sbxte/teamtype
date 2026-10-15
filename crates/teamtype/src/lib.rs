@@ -26,6 +26,7 @@ pub mod editor_protocol;
 pub(crate) mod testing;
 
 // Private modules
+pub mod code;
 mod editor;
 mod editor_connection;
 mod jsonrpc_forwarder;

@@ -25,6 +25,10 @@ pub struct Cli {
 }
 
 #[derive(Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "flags are a flat set of independent CLI switches"
+)]
 pub struct ShareJoinFlags {
     /// EXPERIMENTAL: Also synchronize version-control directories like .git/ or .jj/, which are normally
     /// ignored. For Git, this will synchronize all branches, commits, etc. as well as your .git/config.
@@ -56,6 +60,12 @@ pub struct ShareJoinFlags {
     /// secret address (`manual`). Defaults: auto for magic-wormhole/mdns, manual for direct.
     #[arg(long)]
     pub invite: Option<String>,
+    /// When to rotate the invite code: `never` | `on_join` | `on_attempt` | `periodic` | `continuous`.
+    #[arg(long)]
+    pub rotate_code: Option<String>,
+    /// How long a retired invite code stays valid, e.g. `10s`.
+    #[arg(long)]
+    pub rotate_grace: Option<String>,
     /// Bind the Iroh endpoint to a fixed UDP port. Use this together with `--peer-addr`
     /// when mDNS discovery does not work, so the other side has a stable address to dial.
     #[arg(long)]
@@ -65,6 +75,10 @@ pub struct ShareJoinFlags {
     /// and the port printed by `share`.
     #[arg(long)]
     pub peer_addr: Option<String>,
+    /// Endpoint id to dial directly, needed in `--direct` mode (and when joining with an
+    /// invite code where mDNS discovery is unavailable).
+    #[arg(long)]
+    pub peer_id: Option<String>,
     #[arg(long)]
     /// The name that others see next to your cursor. Defaults to your Git username.
     pub username: Option<String>,

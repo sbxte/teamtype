@@ -39,8 +39,11 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
                 mdns,
                 direct,
                 invite,
+                rotate_code,
+                rotate_grace,
                 bind_port,
                 peer_addr,
+                peer_id,
                 sync_vcs,
                 username,
                 ..
@@ -50,7 +53,13 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
     {
         let config_cli = Config {
             base_dir,
-            peer: join_code.map(config::Peer::JoinCode),
+            peer: join_code.map(|code| {
+                if code.starts_with("tt-") {
+                    config::Peer::InviteCode(code)
+                } else {
+                    config::Peer::JoinCode(code)
+                }
+            }),
             emit_secret_address: false,
             magic_wormhole_relay,
             iroh_relay,
@@ -58,8 +67,11 @@ pub fn parse_join_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
             iroh_pkarr_relay,
             mode: mode_from_flags(magic_wormhole, mdns, direct),
             invite: parse_invite(invite)?,
+            rotate_code: parse_rotate_code(rotate_code)?,
+            rotate_grace: parse_rotate_grace(rotate_grace)?,
             bind_port,
             peer_addr,
+            peer_id,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
             username,
         };
@@ -83,8 +95,11 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
                 mdns,
                 direct,
                 invite,
+                rotate_code,
+                rotate_grace,
                 bind_port,
                 peer_addr,
+                peer_id,
                 sync_vcs,
                 username,
                 ..
@@ -103,8 +118,11 @@ pub fn parse_share_config(cli: Cli, ui: &UserInterface) -> Result<Config> {
             iroh_pkarr_relay,
             mode: mode_from_flags(magic_wormhole, mdns, direct),
             invite: parse_invite(invite)?,
+            rotate_code: parse_rotate_code(rotate_code)?,
+            rotate_grace: parse_rotate_grace(rotate_grace)?,
             bind_port,
             peer_addr,
+            peer_id,
             vcs_mode: from_sync_vcs_flag(sync_vcs),
             username,
         };
@@ -131,12 +149,21 @@ fn mode_from_flags(magic_wormhole: bool, mdns: bool, direct: bool) -> Option<con
 }
 
 // Parse the optional `--invite` value.
+#[expect(clippy::needless_pass_by_value)]
 fn parse_invite(invite: Option<String>) -> Result<Option<config::Invite>> {
-    invite
-        .as_deref()
-        .map(config::Invite::parse)
-        .transpose()
-        .map_err(Into::into)
+    invite.as_deref().map(config::Invite::parse).transpose()
+}
+
+// Parse the optional `--rotate-code` value.
+#[expect(clippy::needless_pass_by_value)]
+fn parse_rotate_code(value: Option<String>) -> Result<Option<config::RotateCode>> {
+    value.as_deref().map(config::RotateCode::parse).transpose()
+}
+
+// Parse the optional `--rotate-grace` value.
+#[expect(clippy::needless_pass_by_value)]
+fn parse_rotate_grace(value: Option<String>) -> Result<Option<std::time::Duration>> {
+    value.as_deref().map(config::parse_duration).transpose()
 }
 
 // Map boolean flag inputs to config enum variants.

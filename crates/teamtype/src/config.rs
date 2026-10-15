@@ -38,6 +38,8 @@ const USERNAME_FALLBACK: &str = "Anonymous";
 pub enum Peer {
     SecretAddress(String),
     JoinCode(String),
+    /// A Teamtype invite code (`tt-…`), resolved by deriving a key and dialing directly.
+    InviteCode(String),
 }
 
 #[derive(Debug)]
@@ -210,6 +212,70 @@ impl Display for Invite {
     }
 }
 
+/// When the host rotates its invite code.
+#[derive(Default, Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RotateCode {
+    /// Never rotate; one code for the session.
+    Never,
+    /// Rotate after a successful code join (default).
+    #[default]
+    OnJoin,
+    /// Rotate after any rejected credential.
+    OnAttempt,
+    /// Rotate on a timer.
+    Periodic,
+    /// Regenerate continuously.
+    Continuous,
+}
+
+impl RotateCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::OnJoin => "on_join",
+            Self::OnAttempt => "on_attempt",
+            Self::Periodic => "periodic",
+            Self::Continuous => "continuous",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "never" => Ok(Self::Never),
+            "on_join" => Ok(Self::OnJoin),
+            "on_attempt" => Ok(Self::OnAttempt),
+            "periodic" => Ok(Self::Periodic),
+            "continuous" => Ok(Self::Continuous),
+            other => anyhow::bail!(
+                "Unknown rotate_code `{other}`. Expected one of: never, on_join, on_attempt, periodic, continuous"
+            ),
+        }
+    }
+}
+
+impl Display for RotateCode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Parses a duration like `10`, `10s`, `5m`, or `1h`.
+pub fn parse_duration(value: &str) -> Result<std::time::Duration> {
+    let value = value.trim();
+    let (number, multiplier) = match value.chars().last() {
+        Some('s') => (&value[..value.len() - 1], 1),
+        Some('m') => (&value[..value.len() - 1], 60),
+        Some('h') => (&value[..value.len() - 1], 3600),
+        _ => (value, 1),
+    };
+    let number: u64 = number
+        .trim()
+        .parse()
+        .with_context(|| format!("Invalid duration `{value}`"))?;
+    Ok(std::time::Duration::from_secs(number * multiplier))
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct Config {
     pub base_dir: BaseDir,
@@ -223,12 +289,19 @@ pub struct Config {
     pub mode: Option<Mode>,
     /// Whether the host generates a short invite code. Defaults per mode.
     pub invite: Option<Invite>,
+    /// When to rotate the invite code.
+    pub rotate_code: Option<RotateCode>,
+    /// How long a retired invite code stays valid.
+    pub rotate_grace: Option<std::time::Duration>,
     /// Fixed UDP port for the Iroh endpoint. Useful together with `peer_addr`, so that
     /// another peer can dial this one directly without any discovery.
     pub bind_port: Option<u16>,
     /// One or more comma-separated `ip:port` addresses to dial directly, bypassing all
     /// address discovery (mDNS, DNS, relays).
     pub peer_addr: Option<String>,
+    /// Endpoint id to dial in `direct` mode, e.g. when joining with an invite code and no
+    /// mDNS discovery is available.
+    pub peer_id: Option<String>,
     pub vcs_mode: VcsMode,
     pub username: Option<String>,
 }
@@ -266,6 +339,16 @@ impl Config {
             general_section
                 .get("invite")
                 .map(|i| Invite::parse(i).expect("Failed to parse config parameter `invite`"))
+        });
+        let rotate_code = config_cli.rotate_code.or_else(|| {
+            general_section.get("rotate_code").map(|r| {
+                RotateCode::parse(r).expect("Failed to parse config parameter `rotate_code`")
+            })
+        });
+        let rotate_grace = config_cli.rotate_grace.or_else(|| {
+            general_section.get("rotate_grace").map(|r| {
+                parse_duration(r).expect("Failed to parse config parameter `rotate_grace`")
+            })
         });
         // We load the learned peer from the peers file, if any. This is machine-written and
         // kept separate from the human-owned config file.
@@ -311,6 +394,8 @@ impl Config {
             }),
             mode,
             invite,
+            rotate_code,
+            rotate_grace,
             bind_port: config_cli.bind_port.or_else(|| {
                 general_section.get("bind_port").map(|p| {
                     p.parse()
@@ -320,6 +405,9 @@ impl Config {
             peer_addr: config_cli
                 .peer_addr
                 .or_else(|| general_section.get("peer_addr").map(ToString::to_string)),
+            peer_id: config_cli
+                .peer_id
+                .or_else(|| general_section.get("peer_id").map(ToString::to_string)),
             vcs_mode: config_cli.vcs_mode,
             username: Some(username),
         })
@@ -378,11 +466,44 @@ impl Config {
             .unwrap_or_else(|| Invite::default_for(self.mode()))
     }
 
+    /// The resolved code rotation policy.
+    #[must_use]
+    pub fn rotate_code(&self) -> RotateCode {
+        self.rotate_code.unwrap_or_default()
+    }
+
+    /// The resolved grace period for retired invite codes.
+    #[must_use]
+    pub fn rotate_grace(&self) -> std::time::Duration {
+        self.rotate_grace
+            .unwrap_or_else(|| std::time::Duration::from_secs(10))
+    }
+
+    /// Whether the host generates an invite code in this mode. Only hosts (no configured
+    /// peer) generate codes; a joining peer does not need one.
+    #[must_use]
+    pub fn generates_invite_code(&self) -> bool {
+        self.peer.is_none()
+            && matches!(self.mode(), Mode::Mdns | Mode::Direct)
+            && self.invite() == Invite::Auto
+    }
+
     /// Whether the Magic Wormhole join-code loop should run.
     #[must_use]
     pub fn emit_join_code(&self) -> bool {
         self.mode() == Mode::MagicWormhole && self.invite() == Invite::Auto
     }
+}
+
+/// Stores a peer learned at runtime (for example after a successful invite-code handshake)
+/// in the peers file. Kept separate from the human-owned config file.
+pub(crate) fn store_learned_peer(
+    base_dir: &BaseDir,
+    secret_address: &str,
+    ui: &UserInterface,
+) -> Result<()> {
+    let peers_file = base_dir.join(CONFIG_DIR).join(PEERS_FILE);
+    store_peer(base_dir, &peers_file, secret_address, ui)
 }
 
 fn store_peer(base_dir: &BaseDir, peers_file: &Path, peer: &str, ui: &UserInterface) -> Result<()> {

@@ -11,26 +11,29 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::str::FromStr;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::bail;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::StreamExt as _;
 use iroh::address_lookup::DnsAddressLookup;
 use iroh::address_lookup::pkarr::PkarrPublisher;
 use iroh::endpoint::{
     Connection as IrohEndpointConnection, RecvStream, RelayMode, SendStream, presets,
 };
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMap, RelayUrl, SecretKey};
-use iroh_mdns_address_lookup::MdnsAddressLookup;
+use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use postcard::{from_bytes, to_allocvec};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::sleep;
 use tracing::debug;
 use url::Url;
 
 use self::sync::{Connection, PeerMessage, SyncActor};
-use crate::config::{BaseDir, Config, Mode};
+use crate::code;
+use crate::config::{BaseDir, Config, Mode, RotateCode};
 use crate::daemon::DocumentActorHandle;
 use crate::types::UserInterface;
 
@@ -39,6 +42,10 @@ mod sync;
 const ALPN: &[u8] = b"/teamtype/1";
 /// mDNS service name for advertisement and discovery. Versioned so the protocol can evolve.
 const MDNS_SERVICE_NAME: &str = "teamtype1";
+/// How long a joiner collects mDNS candidates before giving up on discovery.
+const DISCOVERY_WINDOW: Duration = Duration::from_secs(3);
+/// Per-attempt timeout when trying a code against discovered hosts.
+const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct SecretAddress {
     endpoint_addr: EndpointAddr,
@@ -78,9 +85,112 @@ impl FromStr for SecretAddress {
     }
 }
 
+/// Tracks the host's accepted credentials: the long-term passphrase `P` plus the current
+/// invite code and a grace window of recently retired codes.
+struct CodeState {
+    endpoint_id: [u8; 32],
+    long_term: SecretKey,
+    current: Option<(String, SecretKey)>,
+    retired: Vec<(SecretKey, Instant)>,
+    grace: Duration,
+    rotate: RotateCode,
+    ui: UserInterface,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Credential {
+    LongTerm,
+    Code,
+}
+
+impl CodeState {
+    fn new(
+        endpoint_id: [u8; 32],
+        long_term: SecretKey,
+        grace: Duration,
+        rotate: RotateCode,
+        ui: &UserInterface,
+    ) -> Self {
+        Self {
+            endpoint_id,
+            long_term,
+            current: None,
+            retired: Vec::new(),
+            grace,
+            rotate,
+            ui: ui.clone(),
+        }
+    }
+
+    fn prune(&mut self) {
+        let now = Instant::now();
+        self.retired.retain(|(_, expires)| *expires > now);
+    }
+
+    /// Retires the current code (if any) and generates a fresh one, printing it.
+    fn rotate(&mut self) {
+        self.prune();
+        if let Some((_, key)) = self.current.take() {
+            self.retired.push((key, Instant::now() + self.grace));
+        }
+        let code = code::generate();
+        let key = SecretKey::from_bytes(
+            &code::derive_key(&code, &self.endpoint_id).expect("Failed to derive invite key"),
+        );
+        self.ui.inform(&format!(
+            "One other person can use this to connect to you:\n\n   teamtype join {code}\n"
+        ));
+        self.current = Some((code, key));
+    }
+
+    fn long_term(&self) -> &SecretKey {
+        &self.long_term
+    }
+
+    fn check(&mut self, presented: &[u8; 32]) -> Option<Credential> {
+        self.prune();
+        if constant_time_eq::constant_time_eq(presented, &self.long_term.to_bytes()) {
+            return Some(Credential::LongTerm);
+        }
+        if let Some((_, key)) = &self.current
+            && constant_time_eq::constant_time_eq(presented, &key.to_bytes())
+        {
+            return Some(Credential::Code);
+        }
+        for (key, _) in &self.retired {
+            if constant_time_eq::constant_time_eq(presented, &key.to_bytes()) {
+                return Some(Credential::Code);
+            }
+        }
+        None
+    }
+
+    fn on_success(&mut self, used_code: bool) {
+        if used_code && self.rotate == RotateCode::OnJoin {
+            self.rotate();
+        }
+    }
+
+    fn on_failure(&mut self) {
+        if self.rotate == RotateCode::OnAttempt {
+            self.rotate();
+        }
+    }
+}
+
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the joiner credential is a fixed 32-byte key, boxing it saves little"
+)]
 enum PeerAuth {
-    MyPassphrase(SecretKey),
-    YourPassphrase(SecretKey),
+    /// Host side: accepts `P` and any live invite-code key.
+    Host(Arc<Mutex<CodeState>>),
+    /// Joiner side: presents a credential, and expects the host to reply with `P` when the
+    /// credential was a code.
+    Joiner {
+        credential: SecretKey,
+        expect_reply: bool,
+    },
 }
 
 pub struct ConnectionManager {
@@ -88,6 +198,7 @@ pub struct ConnectionManager {
     secret_address: String,
     direct_addresses: Vec<SocketAddr>,
     peer_addr: Vec<SocketAddr>,
+    mdns: Option<MdnsAddressLookup>,
 }
 
 impl ConnectionManager {
@@ -98,19 +209,32 @@ impl ConnectionManager {
     ) -> Result<Self> {
         let (message_tx, message_rx) = mpsc::channel(1);
 
-        let (endpoint, my_passphrase) = Self::build_endpoint(config).await?;
+        let (endpoint, my_passphrase, mdns) = Self::build_endpoint(config).await?;
 
         let encoded_passphrase = data_encoding::HEXLOWER.encode(&my_passphrase.to_bytes());
         let secret_address = format!("{}#{}", endpoint.id(), encoded_passphrase);
         let direct_addresses = Self::local_direct_addresses(&endpoint);
         let peer_addr = Self::parse_peer_addr(config.peer_addr.as_deref())?;
 
+        let code_state = Arc::new(Mutex::new(CodeState::new(
+            *endpoint.id().as_bytes(),
+            my_passphrase.clone(),
+            config.rotate_grace(),
+            config.rotate_code(),
+            ui,
+        )));
+        if config.generates_invite_code() {
+            code_state.lock().await.rotate();
+            Self::spawn_rotation(config, &code_state);
+        }
+
         let mut actor = EndpointActor::new(
             endpoint,
             message_rx,
             message_tx.clone(),
             document_handle,
-            my_passphrase,
+            code_state.clone(),
+            config.base_dir.clone(),
             ui,
         );
 
@@ -121,7 +245,24 @@ impl ConnectionManager {
             secret_address,
             direct_addresses,
             peer_addr,
+            mdns,
         })
+    }
+
+    /// Spawns the timer for `periodic`/`continuous` code rotation, if configured.
+    fn spawn_rotation(config: &Config, code_state: &Arc<Mutex<CodeState>>) {
+        let interval = match config.rotate_code() {
+            RotateCode::Continuous => Duration::from_millis(500),
+            RotateCode::Periodic => config.rotate_grace().max(Duration::from_secs(60)),
+            _ => return,
+        };
+        let code_state = code_state.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(interval).await;
+                code_state.lock().await.rotate();
+            }
+        });
     }
 
     #[must_use]
@@ -137,25 +278,90 @@ impl ConnectionManager {
     }
 
     pub async fn connect(&self, secret_address: String) -> Result<()> {
-        let (response_tx, response_rx) = oneshot::channel();
-
         let mut secret_address = SecretAddress::from_str(&secret_address)?;
         for addr in &self.peer_addr {
             secret_address.endpoint_addr = secret_address.endpoint_addr.with_ip_addr(*addr);
         }
+        self.send_connect(secret_address, false).await
+    }
 
+    async fn send_connect(&self, secret_address: SecretAddress, expect_reply: bool) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
         self.message_tx
             .send(EndpointMessage::Connect {
                 secret_address,
                 response_tx: Some(response_tx),
+                expect_reply,
+                allow_reconnect: !expect_reply,
                 previous_attempts: 0,
             })
             .await
             .expect("EndpointActor task has been killed");
-
         response_rx.await??;
-
         Ok(())
+    }
+
+    /// Connects using an invite code. In `mdns` mode the host id is discovered; otherwise the
+    /// id must be supplied (e.g. via `peer_id` in `--direct` mode).
+    pub async fn connect_with_code(
+        &self,
+        invite_code: &str,
+        peer_id: Option<PublicKey>,
+    ) -> Result<()> {
+        let candidates = match peer_id {
+            Some(id) => vec![id],
+            None => self.discover_candidates().await?,
+        };
+        if candidates.is_empty() {
+            bail!("No Teamtype hosts found on the local network");
+        }
+
+        let mut last_err = None;
+        for id in candidates {
+            let key = code::derive_key(invite_code, id.as_bytes())?;
+            let mut endpoint_addr: EndpointAddr = id.into();
+            for addr in &self.peer_addr {
+                endpoint_addr = endpoint_addr.with_ip_addr(*addr);
+            }
+            let secret_address = SecretAddress {
+                endpoint_addr,
+                passphrase: SecretKey::from_bytes(&key),
+            };
+            let attempt = tokio::time::timeout(
+                CONNECT_ATTEMPT_TIMEOUT,
+                self.send_connect(secret_address, true),
+            )
+            .await;
+            match attempt {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(err)) => last_err = Some(err),
+                Err(_) => last_err = Some(anyhow::anyhow!("connection attempt timed out")),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Invite code did not match any host")))
+    }
+
+    /// Collects endpoint ids advertised over mDNS for a short window.
+    async fn discover_candidates(&self) -> Result<Vec<PublicKey>> {
+        let Some(mdns) = &self.mdns else {
+            return Ok(Vec::new());
+        };
+        let mut ids = Vec::new();
+        let mut stream = mdns.subscribe().await;
+        let deadline = tokio::time::Instant::now() + DISCOVERY_WINDOW;
+        loop {
+            match tokio::time::timeout_at(deadline, stream.next()).await {
+                Ok(Some(DiscoveryEvent::Discovered { endpoint_info, .. })) => {
+                    let id = endpoint_info.endpoint_id;
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+                Ok(Some(DiscoveryEvent::Expired { .. })) => {}
+                Ok(Some(_) | None) | Err(_) => break,
+            }
+        }
+        Ok(ids)
     }
 
     /// Parses a comma-separated list of `ip:port` addresses.
@@ -198,18 +404,18 @@ impl ConnectionManager {
         addrs
     }
 
-    async fn build_endpoint(config: &Config) -> Result<(Endpoint, SecretKey)> {
+    async fn build_endpoint(
+        config: &Config,
+    ) -> Result<(Endpoint, SecretKey, Option<MdnsAddressLookup>)> {
         let (secret_key, my_passphrase) = Self::get_keypair(&config.base_dir);
 
         let builder = match config.mode() {
-            // LAN-only: no relays, no n0 DNS/pkarr. Discovery is mDNS only.
-            Mode::Mdns => Endpoint::builder(presets::Minimal)
-                .secret_key(secret_key)
-                .alpns(vec![ALPN.to_vec()])
-                .relay_mode(RelayMode::Disabled)
-                .address_lookup(MdnsAddressLookup::builder().service_name(MDNS_SERVICE_NAME)),
-            // Direct: no discovery at all. Peers are dialed by their supplied address.
-            Mode::Direct => Endpoint::builder(presets::Minimal)
+            // LAN-only: no relays, no n0 DNS/pkarr. Discovery is mDNS only. The mDNS lookup is
+            // added after binding so we can keep a handle for candidate discovery.
+            // LAN-only and direct both have no relays and no n0 DNS/pkarr. In mDNS mode the
+            // lookup is added after binding so we can keep a handle for candidate discovery;
+            // direct mode dials only supplied addresses.
+            Mode::Mdns | Mode::Direct => Endpoint::builder(presets::Minimal)
                 .secret_key(secret_key)
                 .alpns(vec![ALPN.to_vec()])
                 .relay_mode(RelayMode::Disabled),
@@ -263,7 +469,22 @@ impl ConnectionManager {
 
         let endpoint = builder.bind().await?;
 
-        Ok((endpoint, my_passphrase))
+        // In mDNS mode we register the lookup after binding so we keep a handle for discovery.
+        let mdns = if config.mode() == Mode::Mdns {
+            let lookup = MdnsAddressLookup::builder()
+                .service_name(MDNS_SERVICE_NAME)
+                .build(endpoint.id())
+                .context("Failed to build mDNS address lookup")?;
+            let services = endpoint
+                .address_lookup()
+                .context("Endpoint has no address lookup registry")?;
+            services.add(lookup.clone());
+            Some(lookup)
+        } else {
+            None
+        };
+
+        Ok((endpoint, my_passphrase, mdns))
     }
 
     fn get_keypair(base_dir: &BaseDir) -> (SecretKey, SecretKey) {
@@ -329,6 +550,10 @@ enum EndpointMessage {
         // On connection success, this channel will be pinged.
         // Used for the initial connection, where we want to fail if connecting fails.
         response_tx: Option<oneshot::Sender<Result<()>>>,
+        // Whether the host should reply with the long-term passphrase after auth.
+        expect_reply: bool,
+        // Whether to keep retrying after a failure.
+        allow_reconnect: bool,
         // How many times have we already attempted to connect?
         previous_attempts: usize,
     },
@@ -341,7 +566,8 @@ struct EndpointActor {
     message_rx: mpsc::Receiver<EndpointMessage>,
     message_tx: mpsc::Sender<EndpointMessage>,
     document_handle: DocumentActorHandle,
-    my_passphrase: SecretKey,
+    code_state: Arc<Mutex<CodeState>>,
+    base_dir: BaseDir,
     ui: UserInterface,
 }
 
@@ -351,7 +577,8 @@ impl EndpointActor {
         message_rx: mpsc::Receiver<EndpointMessage>,
         message_tx: mpsc::Sender<EndpointMessage>,
         document_handle: DocumentActorHandle,
-        my_passphrase: SecretKey,
+        code_state: Arc<Mutex<CodeState>>,
+        base_dir: BaseDir,
         ui: &UserInterface,
     ) -> Self {
         Self {
@@ -359,7 +586,8 @@ impl EndpointActor {
             message_rx,
             message_tx,
             document_handle,
-            my_passphrase,
+            code_state,
+            base_dir,
             ui: ui.clone(),
         }
     }
@@ -369,6 +597,8 @@ impl EndpointActor {
             EndpointMessage::Connect {
                 secret_address,
                 response_tx,
+                expect_reply,
+                allow_reconnect,
                 previous_attempts,
             } => {
                 let endpoint_addr = secret_address.endpoint_addr.clone();
@@ -381,22 +611,66 @@ impl EndpointActor {
                                 .send(Err(err.into()))
                                 .expect("Connect receiver dropped");
                         }
-                        Self::reconnect(
-                            self.message_tx.clone(),
-                            secret_address,
-                            previous_attempts,
-                            &self.ui,
-                        )
-                        .await
-                        .expect("Failed to initiate reconnection");
+                        if allow_reconnect {
+                            Self::reconnect(
+                                self.message_tx.clone(),
+                                secret_address,
+                                previous_attempts,
+                                &self.ui,
+                            )
+                            .await
+                            .expect("Failed to initiate reconnection");
+                        }
                         // Not really Ok, but Ok enough.
                         return Ok(());
                     }
                 };
 
                 let endpoint_id = conn.remote_id();
-                self.ui.inform(&format!("Connected to peer: {endpoint_id}"));
+                let auth = PeerAuth::Joiner {
+                    credential: secret_address.passphrase.clone(),
+                    expect_reply,
+                };
 
+                // Authenticate before reporting success, so a wrong invite code fails this
+                // attempt and the caller can try the next candidate.
+                let stream = match PeerMessageStream::new(conn.clone(), &auth).await {
+                    Ok((stream, learned)) => {
+                        if let Some(long_term) = learned {
+                            let secret = format!(
+                                "{}#{}",
+                                endpoint_id,
+                                data_encoding::HEXLOWER.encode(&long_term.to_bytes())
+                            );
+                            if let Err(err) =
+                                crate::config::store_learned_peer(&self.base_dir, &secret, &self.ui)
+                            {
+                                debug!("Failed to store learned peer: {err:?}");
+                            }
+                        }
+                        stream
+                    }
+                    Err(err) => {
+                        if let Some(response_tx) = response_tx {
+                            response_tx
+                                .send(Err(err))
+                                .expect("Connect receiver dropped");
+                        }
+                        if allow_reconnect {
+                            Self::reconnect(
+                                self.message_tx.clone(),
+                                secret_address,
+                                previous_attempts,
+                                &self.ui,
+                            )
+                            .await
+                            .expect("Failed to initiate reconnection");
+                        }
+                        return Ok(());
+                    }
+                };
+
+                self.ui.inform(&format!("Connected to peer: {endpoint_id}"));
                 if let Some(response_tx) = response_tx {
                     response_tx.send(Ok(())).expect("Connect receiver dropped");
                 }
@@ -406,18 +680,12 @@ impl EndpointActor {
                 tokio::spawn({
                     let ui = self.ui.clone();
                     async move {
-                        if let Err(err) = Self::handle_peer(
-                            document_handle_clone,
-                            conn,
-                            PeerAuth::YourPassphrase(secret_address.passphrase.clone()),
-                        )
-                        .await
-                        {
-                            debug!("Error while handling a peer: {:?}", err);
+                        Self::run_syncer(document_handle_clone, stream).await;
+                        if allow_reconnect {
+                            Self::reconnect(message_tx_clone, secret_address, 0, &ui)
+                                .await
+                                .expect("Failed to initiate reconnection");
                         }
-                        Self::reconnect(message_tx_clone, secret_address, 0, &ui)
-                            .await
-                            .expect("Failed to initiate reconnection");
                     }
                 });
             }
@@ -446,6 +714,8 @@ impl EndpointActor {
             .send(EndpointMessage::Connect {
                 secret_address,
                 response_tx: None,
+                expect_reply: false,
+                allow_reconnect: true,
                 previous_attempts: previous_attempts + 1,
             })
             .await?;
@@ -493,33 +763,31 @@ impl EndpointActor {
 
         self.ui.inform(&format!("Peer connected: {endpoint_id}"));
 
-        let my_passphrase_clone = self.my_passphrase.clone();
+        let code_state = self.code_state.clone();
         let document_handle_clone = self.document_handle.clone();
         tokio::spawn({
             let ui = self.ui.clone();
             async move {
-                if let Err(err) = Self::handle_peer(
-                    document_handle_clone,
-                    conn,
-                    PeerAuth::MyPassphrase(my_passphrase_clone),
-                )
-                .await
-                {
-                    ui.warn(&format!("Incoming connection failed: {err}"));
+                match PeerMessageStream::new(conn, &PeerAuth::Host(code_state.clone())).await {
+                    Ok((stream, learned)) => {
+                        code_state.lock().await.on_success(learned.is_some());
+                        Self::run_syncer(document_handle_clone, stream).await;
+                    }
+                    Err(err) => {
+                        code_state.lock().await.on_failure();
+                        ui.warn(&format!("Incoming connection failed: {err}"));
+                    }
                 }
                 ui.inform(&format!("Peer disconnected: {endpoint_id}"));
             }
         });
     }
 
-    async fn handle_peer(
-        document_handle: DocumentActorHandle,
-        conn: IrohEndpointConnection,
-        auth: PeerAuth,
-    ) -> Result<()> {
-        let stream = PeerMessageStream::new(conn, auth).await?;
+    async fn run_syncer(document_handle: DocumentActorHandle, stream: PeerMessageStream) {
         let syncer = SyncActor::new(document_handle, Box::new(stream));
-        syncer.run().await
+        if let Err(err) = syncer.run().await {
+            debug!("Error while syncing with peer: {err:?}");
+        }
     }
 }
 
@@ -530,25 +798,40 @@ struct PeerMessageStream {
 }
 
 impl PeerMessageStream {
-    async fn new(conn: IrohEndpointConnection, auth: PeerAuth) -> Result<Self> {
+    async fn new(
+        conn: IrohEndpointConnection,
+        auth: &PeerAuth,
+    ) -> Result<(Self, Option<SecretKey>)> {
+        let mut learned = None;
         let (send, receive) = match auth {
-            PeerAuth::YourPassphrase(passphrase) => {
-                let (mut send, recv) = conn.open_bi().await?;
-
-                send.write_all(&passphrase.to_bytes()).await?;
-
+            PeerAuth::Joiner {
+                credential,
+                expect_reply,
+            } => {
+                let (mut send, mut recv) = conn.open_bi().await?;
+                send.write_all(&credential.to_bytes()).await?;
+                if *expect_reply {
+                    let mut received_passphrase = [0; 32];
+                    recv.read_exact(&mut received_passphrase).await?;
+                    learned = Some(SecretKey::from_bytes(&received_passphrase));
+                }
                 (send, recv)
             }
-            PeerAuth::MyPassphrase(passphrase) => {
-                let (send, mut recv) = conn.accept_bi().await?;
+            PeerAuth::Host(state) => {
+                let (mut send, mut recv) = conn.accept_bi().await?;
 
                 let mut received_passphrase = [0; 32];
                 recv.read_exact(&mut received_passphrase).await?;
 
-                // Guard against timing attacks.
-                if !constant_time_eq::constant_time_eq(&received_passphrase, &passphrase.to_bytes())
-                {
-                    bail!("Peer provided incorrect passphrase.");
+                let credential = state.lock().await.check(&received_passphrase);
+                match credential {
+                    Some(Credential::LongTerm) => {}
+                    Some(Credential::Code) => {
+                        let long_term = state.lock().await.long_term().clone();
+                        send.write_all(&long_term.to_bytes()).await?;
+                        learned = Some(long_term);
+                    }
+                    None => bail!("Peer provided incorrect passphrase."),
                 }
 
                 (send, recv)
@@ -561,7 +844,7 @@ impl PeerMessageStream {
             let _ = Self::read_loop(receive, message_tx).await;
         });
 
-        Ok(Self { send, message_rx })
+        Ok((Self { send, message_rx }, learned))
     }
 
     async fn read_loop(

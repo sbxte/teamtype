@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug, Formatter};
 use std::iter::repeat_with;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -1062,12 +1063,10 @@ impl Daemon {
             .expect("Failed to start connection manager");
         let address = connection_manager.secret_address();
 
-        // TODO(invite-codes): replace with the print matrix once invite codes exist for
-        // mdns/direct (print the code when invite=auto, a hint otherwise). Until then,
-        // non-Magic-Wormhole modes print the secret address so they stay usable.
-        let print_secret = config.emit_secret_address
-            || (config.mode() != Mode::MagicWormhole && !config.emit_join_code());
-        if print_secret {
+        if config.peer.is_none()
+            && (config.emit_secret_address
+                || (config.mode() != Mode::MagicWormhole && !config.generates_invite_code()))
+        {
             ui.inform(&docstr!(format!
                 /// Others can connect by putting the following secret address in their .teamtype/config:
                 ///
@@ -1075,7 +1074,12 @@ impl Daemon {
                 ///
             ));
         }
-        if matches!(config.mode(), Mode::Mdns | Mode::Direct) || config.bind_port.is_some() {
+        if config.peer.is_none() && config.generates_invite_code() && !config.emit_secret_address {
+            ui.inform("Run with --show-secret-address to also print the long-term secret address.");
+        }
+        if config.peer.is_none()
+            && (matches!(config.mode(), Mode::Mdns | Mode::Direct) || config.bind_port.is_some())
+        {
             let direct_addrs = connection_manager
                 .direct_addresses()
                 .iter()
@@ -1083,12 +1087,12 @@ impl Daemon {
                 .collect::<Vec<_>>()
                 .join(",");
             if !direct_addrs.is_empty() {
+                let endpoint_id = address.split('#').next().unwrap_or(address);
                 ui.inform(&docstr!(format!
-                    /// If the other machine cannot find this one via mDNS (for example because the
-                    /// network blocks multicast), it can dial this host directly. Add this to its
-                    /// .teamtype/config:
+                    /// This host's id and addresses (for `--direct` mode):
                     ///
-                    ///     peer_addr={direct_addrs}
+                    ///     --peer-id {endpoint_id}
+                    ///     --peer-addr {direct_addrs}
                     ///
                 ));
             }
@@ -1097,11 +1101,26 @@ impl Daemon {
             put_secret_address_into_wormhole(address, config.magic_wormhole_relay.clone(), ui)
                 .await;
         }
-        if let Some(Peer::SecretAddress(ref secret_address)) = config.peer {
-            connection_manager
-                .connect(secret_address.clone())
-                .await
-                .context("Failed to connect to specified peer")?;
+        match config.peer {
+            Some(Peer::SecretAddress(ref secret_address)) => {
+                connection_manager
+                    .connect(secret_address.clone())
+                    .await
+                    .context("Failed to connect to specified peer")?;
+            }
+            Some(Peer::InviteCode(ref invite_code)) => {
+                let peer_id = config
+                    .peer_id
+                    .as_deref()
+                    .map(iroh::PublicKey::from_str)
+                    .transpose()
+                    .context("Invalid peer_id")?;
+                connection_manager
+                    .connect_with_code(invite_code, peer_id)
+                    .await
+                    .context("Failed to join with invite code")?;
+            }
+            _ => {}
         }
 
         Ok(Self {
