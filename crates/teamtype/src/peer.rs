@@ -8,6 +8,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::net::SocketAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::str::FromStr;
 use std::time::Duration;
@@ -46,12 +47,20 @@ impl FromStr for SecretAddress {
 
     fn from_str(s: &str) -> Result<Self> {
         let parts: Vec<&str> = s.split('#').collect();
-        if parts.len() != 2 {
-            bail!("Peer string must have format <endpoint_id>#<passphrase>");
+        if !(2..=3).contains(&parts.len()) {
+            bail!("Peer string must have format <endpoint_id>#<passphrase>[#ip:port]");
         }
 
-        let endpoint_addr = PublicKey::from_str(parts[0])?.into();
+        let endpoint_addr: EndpointAddr = PublicKey::from_str(parts[0])?.into();
         let passphrase = SecretKey::from_str(parts[1])?;
+
+        let endpoint_addr = if parts.len() >= 3
+            && let Ok(socket_addr) = SocketAddr::from_str(parts[2])
+        {
+            endpoint_addr.with_ip_addr(socket_addr)
+        } else {
+            endpoint_addr
+        };
 
         Ok(Self {
             endpoint_addr,
